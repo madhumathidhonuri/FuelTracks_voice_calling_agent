@@ -1,5 +1,6 @@
 import logging
 import base64
+from typing import Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from src.telephony.call_manager import call_manager
 from src.orchestrator.turn_manager import TurnManager
@@ -11,25 +12,33 @@ router = APIRouter()
 @router.websocket("/ws/media")
 async def websocket_endpoint(
     websocket: WebSocket,
-    call_sid: str = Query(...)
+    call_sid: Optional[str] = Query(None),
+    CallSid: Optional[str] = Query(None)
 ):
     """
     WebSocket endpoint for bidirectional audio streaming with Exotel.
     """
+    qp = dict(websocket.query_params)
+    resolved_call_sid = call_sid or CallSid or qp.get("call_sid") or qp.get("CallSid")
+    
+    if not resolved_call_sid:
+        logger.error("Rejecting WebSocket connection: CallSid query parameter is missing.")
+        await websocket.close(code=1008)
+        return
+
     await websocket.accept()
-    logger.info(f"WebSocket connected for Call SID {call_sid}")
+    logger.info(f"WebSocket connected for Call SID {resolved_call_sid}")
     
     # 1. Retrieve or create the call session
-    session = call_manager.get_session_by_call(call_sid)
+    session = call_manager.get_session_by_call(resolved_call_sid)
     if not session:
-        logger.warning(f"No active session for Call SID {call_sid} on WS connection. Creating default/outbound dynamic session.")
-        qp = dict(websocket.query_params)
+        logger.warning(f"No active session for Call SID {resolved_call_sid} on WS connection. Creating default/outbound dynamic session.")
         from_number = qp.get("from_number", qp.get("From", "unknown"))
         to_number = qp.get("to_number", qp.get("To", "unknown"))
         call_type = qp.get("call_type", "inbound_routing")
         
         session = call_manager.create_session(
-            call_sid=call_sid,
+            call_sid=resolved_call_sid,
             from_number=from_number,
             to_number=to_number,
             call_type=call_type
@@ -94,7 +103,7 @@ async def websocket_endpoint(
                 break
                 
     except WebSocketDisconnect:
-        logger.info(f"WebSocket disconnected for stream {stream_sid or call_sid}")
+        logger.info(f"WebSocket disconnected for stream {stream_sid or resolved_call_sid}")
     except Exception as e:
         logger.exception(f"Error in WebSocket handler loop: {e}")
     finally:
@@ -108,7 +117,7 @@ async def websocket_endpoint(
         if stream_sid:
             call_manager.close_session(stream_sid, outcome="completed")
         else:
-            call_manager.close_session(f"no_stream_{call_sid}", outcome="abandoned")
+            call_manager.close_session(f"no_stream_{resolved_call_sid}", outcome="abandoned")
         
         try:
             await websocket.close()

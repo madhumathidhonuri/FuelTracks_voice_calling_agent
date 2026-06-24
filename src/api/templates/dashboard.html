@@ -1,0 +1,1101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fuel Tracks Voice Calling Agent - Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --card-bg: rgba(17, 25, 40, 0.75);
+            --card-border: rgba(255, 255, 255, 0.08);
+            --text-color: #f3f4f6;
+            --text-muted: #9ca3af;
+            --primary: #6366f1;
+            --primary-glow: rgba(99, 102, 241, 0.15);
+            --primary-hover: #4f46e5;
+            --secondary: #a855f7;
+            --secondary-hover: #9333ea;
+            --success: #10b981;
+            --danger: #ef4444;
+            --info: #06b6d4;
+            --font-outfit: 'Outfit', sans-serif;
+            --font-inter: 'Inter', sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: var(--font-inter);
+            overflow-x: hidden;
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(99, 102, 241, 0.08) 0%, transparent 40%),
+                radial-gradient(circle at 90% 80%, rgba(168, 85, 247, 0.08) 0%, transparent 40%);
+            background-attachment: fixed;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2.5rem;
+            border-bottom: 1px solid var(--card-border);
+            padding-bottom: 1.5rem;
+            backdrop-filter: blur(10px);
+        }
+
+        .logo-section h1 {
+            font-family: var(--font-outfit);
+            font-size: 2rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, #fff 30%, #a855f7 70%, #6366f1 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -0.5px;
+        }
+
+        .logo-section p {
+            color: var(--text-muted);
+            font-size: 0.875rem;
+            margin-top: 0.25rem;
+        }
+
+        .badge-system {
+            background: rgba(99, 102, 241, 0.1);
+            border: 1px solid rgba(99, 102, 241, 0.2);
+            color: var(--primary);
+            padding: 0.5rem 1rem;
+            border-radius: 9999px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .badge-system .pulse-dot {
+            width: 8px;
+            height: 8px;
+            background-color: var(--primary);
+            border-radius: 50%;
+            display: inline-block;
+            box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.7);
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% {
+                transform: scale(0.95);
+                box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.7);
+            }
+            70% {
+                transform: scale(1);
+                box-shadow: 0 0 0 6px rgba(99, 102, 241, 0);
+            }
+            100% {
+                transform: scale(0.95);
+                box-shadow: 0 0 0 0 rgba(99, 102, 241, 0);
+            }
+        }
+
+        .grid-layout {
+            display: grid;
+            grid-template-columns: 1.2fr 0.8fr;
+            gap: 2rem;
+            margin-bottom: 2rem;
+        }
+
+        @media (max-width: 1024px) {
+            .grid-layout {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 2rem;
+            backdrop-filter: blur(12px);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+            transition: transform 0.3s ease, border-color 0.3s ease;
+        }
+
+        .card:hover {
+            border-color: rgba(255, 255, 255, 0.15);
+        }
+
+        .card-title {
+            font-family: var(--font-outfit);
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        /* Upload Area */
+        .upload-zone {
+            border: 2px dashed rgba(255, 255, 255, 0.15);
+            border-radius: 12px;
+            padding: 3rem 2rem;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            position: relative;
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .upload-zone:hover, .upload-zone.dragover {
+            border-color: var(--primary);
+            background: rgba(99, 102, 241, 0.04);
+        }
+
+        .upload-icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            color: var(--primary);
+            display: inline-block;
+            transition: transform 0.3s ease;
+        }
+
+        .upload-zone:hover .upload-icon {
+            transform: translateY(-5px);
+        }
+
+        .upload-zone p {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .upload-zone p strong {
+            color: var(--text-color);
+        }
+
+        .file-input {
+            display: none;
+        }
+
+        /* Form Controls */
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            margin-top: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .form-group label {
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: var(--text-muted);
+        }
+
+        .form-control {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--card-border);
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            color: var(--text-color);
+            font-family: var(--font-inter);
+            font-size: 0.9rem;
+            outline: none;
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .form-control:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 2px var(--primary-glow);
+        }
+
+        select.form-control option {
+            background: var(--bg-color);
+            color: var(--text-color);
+        }
+
+        /* Buttons */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            background: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            padding: 0.75rem 1.5rem;
+            font-family: var(--font-inter);
+            font-weight: 500;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            width: 100%;
+        }
+
+        .btn:hover:not(:disabled) {
+            background: var(--primary-hover);
+            transform: translateY(-1px);
+        }
+
+        .btn:active:not(:disabled) {
+            transform: translateY(0);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid var(--card-border);
+            color: var(--text-color);
+        }
+
+        .btn-secondary:hover:not(:disabled) {
+            background: rgba(255, 255, 255, 0.12);
+        }
+
+        .btn-gradient {
+            background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
+        }
+
+        .btn-gradient:hover:not(:disabled) {
+            background: linear-gradient(135deg, var(--primary-hover) 0%, var(--secondary-hover) 100%);
+            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4);
+        }
+
+        /* Table */
+        .table-container {
+            width: 100%;
+            overflow-x: auto;
+            margin-top: 1.5rem;
+            border-radius: 8px;
+            border: 1px solid var(--card-border);
+            background: rgba(255, 255, 255, 0.01);
+            max-height: 350px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 0.9rem;
+        }
+
+        th {
+            background: rgba(255, 255, 255, 0.03);
+            font-family: var(--font-outfit);
+            font-weight: 600;
+            color: var(--text-muted);
+            padding: 1rem;
+            border-bottom: 1px solid var(--card-border);
+        }
+
+        td {
+            padding: 1rem;
+            border-bottom: 1px solid var(--card-border);
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        tr:hover td {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.25rem 0.6rem;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            text-transform: capitalize;
+        }
+
+        .badge-purple {
+            background: rgba(168, 85, 247, 0.15);
+            color: #d8b4fe;
+            border: 1px solid rgba(168, 85, 247, 0.2);
+        }
+
+        .badge-blue {
+            background: rgba(99, 102, 241, 0.15);
+            color: #c7d2fe;
+            border: 1px solid rgba(99, 102, 241, 0.2);
+        }
+
+        .badge-cyan {
+            background: rgba(6, 182, 212, 0.15);
+            color: #a5f3fc;
+            border: 1px solid rgba(6, 182, 212, 0.2);
+        }
+
+        .badge-green {
+            background: rgba(16, 185, 129, 0.15);
+            color: #a7f3d0;
+            border: 1px solid rgba(16, 185, 129, 0.2);
+        }
+
+        .badge-red {
+            background: rgba(239, 68, 68, 0.15);
+            color: #fca5a5;
+            border: 1px solid rgba(239, 68, 68, 0.2);
+        }
+
+        /* Monitor and Logs Card */
+        .campaign-monitor {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+
+        .metric-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1rem;
+        }
+
+        .metric-box {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 1.25rem 1rem;
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+
+        .metric-box:hover {
+            background: rgba(255, 255, 255, 0.05);
+            transform: translateY(-2px);
+        }
+
+        .metric-value {
+            font-family: var(--font-outfit);
+            font-size: 1.75rem;
+            font-weight: 700;
+            margin-bottom: 0.25rem;
+        }
+
+        .metric-label {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .progress-bar-container {
+            width: 100%;
+            height: 10px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 9999px;
+            overflow: hidden;
+            margin-top: 0.5rem;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, var(--primary) 0%, var(--secondary) 100%);
+            width: 0%;
+            transition: width 0.4s ease;
+        }
+
+        /* Recent Calls list */
+        .recent-calls-list {
+            margin-top: 2rem;
+        }
+
+        .list-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.25rem;
+        }
+
+        .clickable-row {
+            cursor: pointer;
+            transition: background-color 0.2s ease;
+        }
+
+        .clickable-row:hover td {
+            background: rgba(99, 102, 241, 0.08) !important;
+        }
+
+        /* Transcript Modal/Panel */
+        .transcript-drawer {
+            display: grid;
+            grid-template-rows: auto 1fr;
+            height: 100%;
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 2rem;
+            backdrop-filter: blur(12px);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+            max-height: 600px;
+        }
+
+        .transcript-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--card-border);
+            padding-bottom: 1rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .transcript-body {
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            padding-right: 0.5rem;
+            max-height: 450px;
+        }
+
+        .message-bubble {
+            max-width: 80%;
+            padding: 0.75rem 1.25rem;
+            border-radius: 12px;
+            font-size: 0.9rem;
+            line-height: 1.4;
+            position: relative;
+            animation: fadeInBubble 0.3s ease forwards;
+        }
+
+        @keyframes fadeInBubble {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .message-agent {
+            align-self: flex-end;
+            background: rgba(168, 85, 247, 0.2);
+            border: 1px solid rgba(168, 85, 247, 0.3);
+            color: #e9d5ff;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message-customer {
+            align-self: flex-start;
+            background: rgba(99, 102, 241, 0.15);
+            border: 1px solid rgba(99, 102, 241, 0.25);
+            color: #e0e7ff;
+            border-bottom-left-radius: 4px;
+        }
+
+        .message-meta {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin-top: 0.4rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .message-bubble strong {
+            display: block;
+            font-size: 0.75rem;
+            color: rgba(255, 255, 255, 0.6);
+            margin-bottom: 0.2rem;
+            font-family: var(--font-outfit);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .placeholder-text {
+            color: var(--text-muted);
+            text-align: center;
+            padding: 3rem 1rem;
+            font-size: 0.95rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            gap: 1rem;
+        }
+
+        .placeholder-icon {
+            font-size: 2.5rem;
+            color: rgba(255, 255, 255, 0.15);
+        }
+
+        /* SVG icons */
+        .icon {
+            width: 18px;
+            height: 18px;
+            vertical-align: middle;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .status-ongoing {
+            color: var(--info);
+        }
+
+        .status-completed, .status-success, .status-terminal {
+            color: var(--success);
+        }
+
+        .status-failed, .status-no-answer, .status-busy {
+            color: var(--danger);
+        }
+
+        /* Scrollbar styling */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.01);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 9999px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo-section">
+                <h1>Fuel Tracks AI Campaign Manager</h1>
+                <p>Telemetry-Powered Outbound Call Dialer</p>
+            </div>
+            <div class="badge-system">
+                <span class="pulse-dot"></span>
+                <span>System Connected</span>
+            </div>
+        </header>
+
+        <div class="grid-layout">
+            <!-- Left Side: Campaign Upload and Execution -->
+            <div style="display: flex; flex-direction: column; gap: 2rem;">
+                <!-- Upload Card -->
+                <div class="card">
+                    <h2 class="card-title">
+                        <svg class="icon" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+                        Upload Outbound Leads File
+                    </h2>
+                    
+                    <div class="upload-zone" id="drop-zone" onclick="document.getElementById('file-input').click()">
+                        <span class="upload-icon">
+                            <svg style="width: 48px; height: 48px;" class="icon" viewBox="0 0 24 24"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
+                        </span>
+                        <p>Drag and drop your customer list <strong>(.xlsx)</strong> here, or click to browse.</p>
+                        <span class="badge badge-purple" id="selected-file-badge" style="display: none;">No file selected</span>
+                        <input type="file" id="file-input" class="file-input" accept=".xlsx" onchange="handleFileSelect(event)">
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="default-call-type">Inferred Default Campaign Type</label>
+                            <select id="default-call-type" class="form-control" onchange="triggerParse()">
+                                <option value="lead_followup">Lead Follow-Up (Default)</option>
+                                <option value="marketing">Marketing Promotion</option>
+                                <option value="support">Customer Support</option>
+                                <option value="dealer_recruitment">Dealer Recruitment</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="default-product">Default Product Interest (Optional)</label>
+                            <input type="text" id="default-product" class="form-control" placeholder="e.g. GPS Tracking Device" onchange="triggerParse()">
+                        </div>
+                    </div>
+
+                    <div style="display: flex; gap: 1rem; margin-top: 1.5rem;">
+                        <button class="btn btn-secondary" id="parse-btn" onclick="triggerParse()" disabled>
+                            <svg class="icon" viewBox="0 0 24 24"><path d="M20 11.08V12a8 8 0 1 1-4.8-7.32"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                            Analyze File
+                        </button>
+                        <button class="btn btn-gradient" id="start-campaign-btn" onclick="startCampaign()" disabled>
+                            <svg class="icon" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                            Launch Campaign
+                        </button>
+                    </div>
+
+                    <!-- Customer Preview Table -->
+                    <div id="preview-section" style="display: none;">
+                        <div class="list-header" style="margin-top: 2rem; margin-bottom: 0.5rem;">
+                            <h3 style="font-family: var(--font-outfit); font-size: 1.05rem;">Contacts Preview (<span id="contact-count">0</span> found)</h3>
+                        </div>
+                        <div class="table-container">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Name</th>
+                                        <th>Phone</th>
+                                        <th>Product Interest</th>
+                                        <th>Call Type</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="preview-table-body">
+                                    <!-- Dynamic rows -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Recent Call Logs Card -->
+                <div class="card">
+                    <div class="list-header">
+                        <h2 class="card-title" style="margin-bottom: 0;">
+                            <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                            Call Analytics Log
+                        </h2>
+                        <button class="btn btn-secondary" style="width: auto; padding: 0.4rem 0.8rem; font-size: 0.8rem;" onclick="loadRecentCalls()">
+                            <svg class="icon" viewBox="0 0 24 24"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                            Refresh
+                        </button>
+                    </div>
+
+                    <div class="table-container" style="max-height: 400px;">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Call SID</th>
+                                    <th>Recipient</th>
+                                    <th>Date & Time</th>
+                                    <th>Duration</th>
+                                    <th>Campaign</th>
+                                    <th>Outcome</th>
+                                </tr>
+                            </thead>
+                            <tbody id="recent-calls-body">
+                                <!-- Dynamic rows -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Side: Live Monitoring & Active Transcript -->
+            <div style="display: flex; flex-direction: column; gap: 2rem; position: sticky; top: 2rem; height: max-content;">
+                <!-- Campaign Live Progress -->
+                <div class="card" id="campaign-progress-card" style="display: none;">
+                    <h2 class="card-title">
+                        <svg class="icon" viewBox="0 0 24 24"><path d="M21.21 15.89A10 10 0 1 1 8 2.83M22 12A10 10 0 0 0 12 2v10z"/></svg>
+                        Campaign Dispatcher Status
+                    </h2>
+                    <div class="campaign-monitor">
+                        <div class="metric-grid">
+                            <div class="metric-box">
+                                <div class="metric-value" id="metric-total">0</div>
+                                <div class="metric-label">Total</div>
+                            </div>
+                            <div class="metric-box">
+                                <div class="metric-value" id="metric-processed" style="color: var(--info);">0</div>
+                                <div class="metric-label">Dialed</div>
+                            </div>
+                            <div class="metric-box">
+                                <div class="metric-value" id="metric-success" style="color: var(--success);">0</div>
+                                <div class="metric-label">Success</div>
+                            </div>
+                            <div class="metric-box">
+                                <div class="metric-value" id="metric-failed" style="color: var(--danger);">0</div>
+                                <div class="metric-label">Failed</div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <div style="display: flex; justify-content: space-between; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.25rem;">
+                                <span>Progress</span>
+                                <span id="progress-percent">0%</span>
+                            </div>
+                            <div class="progress-bar-container">
+                                <div class="progress-bar" id="campaign-progress-fill"></div>
+                            </div>
+                        </div>
+
+                        <div id="campaign-detail-list" style="max-height: 150px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; border-top: 1px solid var(--card-border); padding-top: 1rem;">
+                            <!-- Call logs in real time -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Call Transcript View -->
+                <div class="transcript-drawer">
+                    <div class="transcript-header">
+                        <h2 class="card-title" style="margin-bottom: 0;">
+                            <svg class="icon" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                            Live Call Transcript
+                        </h2>
+                        <span class="badge badge-cyan" id="transcript-call-type" style="display: none;">Select Call</span>
+                    </div>
+
+                    <div class="transcript-body" id="transcript-body">
+                        <div class="placeholder-text" id="transcript-placeholder">
+                            <span class="placeholder-icon">
+                                <svg style="width: 48px; height: 48px;" class="icon" viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+                            </span>
+                            <p>Click on any call in the list below to read the detailed dialogue and metrics log.</p>
+                        </div>
+                        <!-- Transcript bubbles will appear here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentFile = null;
+        let parsedCustomers = [];
+        let campaignInterval = null;
+        let selectedCallSid = null;
+        let transcriptPollInterval = null;
+
+        // Drag and drop setup
+        const dropZone = document.getElementById('drop-zone');
+        
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropZone.addEventListener(eventName, e => {
+                e.preventDefault();
+                dropZone.classList.add('dragover');
+            }, false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, e => {
+                e.preventDefault();
+                dropZone.classList.remove('dragover');
+            }, false);
+        });
+
+        dropZone.addEventListener('drop', e => {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            if (files.length) {
+                document.getElementById('file-input').files = files;
+                handleFileSelect({ target: { files } });
+            }
+        });
+
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            
+            currentFile = file;
+            const badge = document.getElementById('selected-file-badge');
+            badge.innerText = file.name;
+            badge.style.display = 'inline-flex';
+            
+            // Enable analyze btn
+            document.getElementById('parse-btn').disabled = false;
+            
+            // Auto infer call type from file name if possible
+            const name = file.name.toLowerCase();
+            const typeSelect = document.getElementById('default-call-type');
+            if (name.includes('marketing') || name.includes('promo')) {
+                typeSelect.value = 'marketing';
+            } else if (name.includes('support') || name.includes('service')) {
+                typeSelect.value = 'support';
+            } else if (name.includes('dealer') || name.includes('recruit') || name.includes('partner')) {
+                typeSelect.value = 'dealer_recruitment';
+            } else {
+                typeSelect.value = 'lead_followup';
+            }
+            
+            triggerParse();
+        }
+
+        async function triggerParse() {
+            if (!currentFile) return;
+
+            const formData = new FormData();
+            formData.append('file', currentFile);
+            formData.append('default_call_type', document.getElementById('default-call-type').value);
+            formData.append('default_product', document.getElementById('default-product').value);
+
+            try {
+                const response = await fetch('/api/campaign/parse', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    parsedCustomers = data.customers;
+                    document.getElementById('contact-count').innerText = data.count;
+                    document.getElementById('preview-section').style.display = 'block';
+                    document.getElementById('start-campaign-btn').disabled = false;
+                    
+                    const tbody = document.getElementById('preview-table-body');
+                    tbody.innerHTML = '';
+                    parsedCustomers.forEach(c => {
+                        const tr = document.createElement('tr');
+                        
+                        let badgeClass = 'badge-blue';
+                        if (c.call_type === 'marketing') badgeClass = 'badge-purple';
+                        else if (c.call_type === 'support') badgeClass = 'badge-red';
+                        else if (c.call_type === 'dealer_recruitment') badgeClass = 'badge-green';
+
+                        tr.innerHTML = `
+                            <td style="font-weight: 500;">${c.name}</td>
+                            <td>${c.phone}</td>
+                            <td><span style="color: var(--text-muted);">${c.product_interest || 'None'}</span></td>
+                            <td><span class="badge ${badgeClass}">${c.call_type.replace('_', ' ')}</span></td>
+                        `;
+                        tbody.appendChild(tr);
+                    });
+                } else {
+                    alert('Error parsing Excel: ' + (data.detail || 'Unknown error'));
+                }
+            } catch (err) {
+                console.error(err);
+                alert('Error parsing file: ' + err.message);
+            }
+        }
+
+        async function startCampaign() {
+            if (!parsedCustomers.length) return;
+
+            try {
+                const response = await fetch('/api/campaign/start', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ customers: parsedCustomers })
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    document.getElementById('campaign-progress-card').style.display = 'block';
+                    document.getElementById('start-campaign-btn').disabled = true;
+                    document.getElementById('parse-btn').disabled = true;
+                    
+                    // Clear logs list
+                    document.getElementById('campaign-detail-list').innerHTML = '';
+                    
+                    // Poll campaign status
+                    clearInterval(campaignInterval);
+                    campaignInterval = setInterval(pollCampaignStatus, 1000);
+                } else {
+                    alert('Failed to start campaign: ' + data.detail);
+                }
+            } catch (err) {
+                alert('Error launching campaign: ' + err.message);
+            }
+        }
+
+        async function pollCampaignStatus() {
+            try {
+                const response = await fetch('/api/campaign/status');
+                const data = await response.json();
+                
+                document.getElementById('metric-total').innerText = data.total;
+                document.getElementById('metric-processed').innerText = data.processed;
+                document.getElementById('metric-success').innerText = data.success;
+                document.getElementById('metric-failed').innerText = data.failed;
+
+                const percent = data.total > 0 ? Math.round((data.processed / data.total) * 100) : 0;
+                document.getElementById('progress-percent').innerText = percent + '%';
+                document.getElementById('campaign-progress-fill').style.width = percent + '%';
+
+                const list = document.getElementById('campaign-detail-list');
+                list.innerHTML = '';
+                
+                // Show call logs in progress card
+                data.details.forEach(d => {
+                    const row = document.createElement('div');
+                    row.style.fontSize = '0.8rem';
+                    row.style.display = 'flex';
+                    row.style.justifyContent = 'space-between';
+                    row.style.padding = '0.25rem 0.5rem';
+                    row.style.borderRadius = '4px';
+                    row.style.background = 'rgba(255, 255, 255, 0.02)';
+                    
+                    const statusColor = d.status === 'success' ? 'var(--success)' : 'var(--danger)';
+                    row.innerHTML = `
+                        <span><strong>${d.name}</strong> (${d.phone})</span>
+                        <span style="color: ${statusColor}; font-weight: 500;">${d.status.toUpperCase()}</span>
+                    `;
+                    list.appendChild(row);
+                });
+
+                if (data.status === 'completed') {
+                    clearInterval(campaignInterval);
+                    document.getElementById('start-campaign-btn').disabled = false;
+                    document.getElementById('parse-btn').disabled = false;
+                    loadRecentCalls(); // reload call list at bottom
+                }
+            } catch (err) {
+                console.error(err);
+            }
+        }
+
+        async function loadRecentCalls() {
+            try {
+                const response = await fetch('/api/calls/recent');
+                const calls = await response.json();
+                
+                const tbody = document.getElementById('recent-calls-body');
+                tbody.innerHTML = '';
+                
+                if (calls.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 2rem;">No recent calls found in database.</td></tr>`;
+                    return;
+                }
+
+                calls.forEach(c => {
+                    const tr = document.createElement('tr');
+                    tr.className = 'clickable-row';
+                    tr.onclick = () => selectCall(c.call_sid);
+                    if (selectedCallSid === c.call_sid) {
+                        tr.style.background = 'rgba(99, 102, 241, 0.12)';
+                    }
+                    
+                    const startTime = new Date(c.start_time).toLocaleString();
+                    const durationStr = c.duration ? Math.round(c.duration) + 's' : 'Ongoing';
+                    
+                    let badgeClass = 'badge-blue';
+                    if (c.call_type === 'marketing') badgeClass = 'badge-purple';
+                    else if (c.call_type === 'support') badgeClass = 'badge-red';
+                    else if (c.call_type === 'dealer_recruitment') badgeClass = 'badge-green';
+
+                    let outcomeClass = 'status-ongoing';
+                    if (c.outcome === 'completed' || c.outcome === 'terminal' || c.outcome === 'hangup') outcomeClass = 'status-completed';
+                    else if (c.outcome === 'failed' || c.outcome === 'no-answer' || c.outcome === 'busy') outcomeClass = 'status-failed';
+
+                    tr.innerHTML = `
+                        <td style="font-family: monospace; font-size: 0.8rem;">${c.call_sid.substring(0, 12)}...</td>
+                        <td><strong>${c.from_number}</strong></td>
+                        <td style="font-size: 0.8rem; color: var(--text-muted);">${startTime}</td>
+                        <td>${durationStr}</td>
+                        <td><span class="badge ${badgeClass}">${c.call_type.replace('_', ' ')}</span></td>
+                        <td><span class="badge" style="text-transform: capitalize; border: none; padding:0;"><span class="${outcomeClass}" style="font-weight: 600;">●</span> ${c.outcome}</span></td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+            } catch (err) {
+                console.error(err);
+            }
+        }
+
+        function selectCall(callSid) {
+            selectedCallSid = callSid;
+            
+            // Highlight selected row in table
+            const rows = document.querySelectorAll('.clickable-row');
+            loadRecentCalls(); // Will re-render with highlight
+            
+            // Show badge
+            const badge = document.getElementById('transcript-call-type');
+            badge.style.display = 'inline-flex';
+            badge.innerText = 'Call: ' + callSid.substring(0, 8);
+            
+            // Start polling transcript
+            clearInterval(transcriptPollInterval);
+            pollTranscript();
+            transcriptPollInterval = setInterval(pollTranscript, 2000);
+        }
+
+        async function pollTranscript() {
+            if (!selectedCallSid) return;
+            
+            try {
+                const response = await fetch('/calls/' + selectedCallSid);
+                if (response.status === 404) {
+                    clearInterval(transcriptPollInterval);
+                    return;
+                }
+                
+                const data = await response.json();
+                const container = document.getElementById('transcript-body');
+                
+                if (!data.transcript || data.transcript.length === 0) {
+                    container.innerHTML = `
+                        <div class="placeholder-text">
+                            <span class="placeholder-icon">
+                                <svg style="width: 48px; height: 48px;" class="icon" viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+                            </span>
+                            <p>Call connected. Waiting for audio streams to commence...</p>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                // Keep scroll position if user scrolled up
+                const isScrolledToBottom = container.scrollHeight - container.clientHeight <= container.scrollTop + 30;
+                
+                container.innerHTML = '';
+                data.transcript.forEach(t => {
+                    const bubble = document.createElement('div');
+                    bubble.className = `message-bubble ${t.role === 'agent' ? 'message-agent' : 'message-customer'}`;
+                    
+                    const time = new Date(t.timestamp).toLocaleTimeString();
+                    const langBadge = t.detected_language ? `<span>Language: ${t.detected_language} (${Math.round(t.language_confidence*100)}%)</span>` : '';
+                    
+                    bubble.innerHTML = `
+                        <strong>${t.role.toUpperCase()}</strong>
+                        <div>${t.text}</div>
+                        <div class="message-meta">
+                            <span>${time}</span>
+                            ${langBadge}
+                        </div>
+                    `;
+                    container.appendChild(bubble);
+                });
+                
+                if (isScrolledToBottom) {
+                    container.scrollTop = container.scrollHeight;
+                }
+                
+                // If call finished, stop polling
+                if (data.call && data.call.outcome !== 'ongoing') {
+                    clearInterval(transcriptPollInterval);
+                }
+            } catch (err) {
+                console.error(err);
+            }
+        }
+
+        // Init load
+        loadRecentCalls();
+    </script>
+</body>
+</html>

@@ -199,6 +199,7 @@ class ConversationManager:
             "lead_followup": "lead follow-up enquiry",
             "support": "customer support",
             "dealer_recruitment": "dealer partner recruitment",
+            "marketing": "marketing campaign",
             "inbound_routing": "initial welcome routing"
         }
         call_purpose = purpose_map.get(self.call_type, "customer service")

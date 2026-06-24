@@ -55,6 +55,23 @@ class OutboundCaller:
         if not self.account_sid or not self.api_key or not self.api_token or not self.caller_id:
             raise ValueError("Exotel credentials and caller ID must be configured in settings.")
 
+        # If running in development with mock/dummy configuration, simulate call queueing
+        if "mock" in str(self.account_sid).lower():
+            import time
+            mock_sid = f"mock-call-{formatted_number.replace('+', '')}-{int(time.time())}"
+            logger.info(f"[SIMULATION] Mock Exotel credentials detected. Registering mock call: {mock_sid}")
+            create_call(
+                call_sid=mock_sid,
+                from_number=formatted_number,
+                to_number=self.caller_id,
+                call_type=call_type
+            )
+            return {
+                "success": True,
+                "call_sid": mock_sid,
+                "status": "ringing"
+            }
+
         # Construct stream URL with customer context
         params = {
             "customer_name": customer_name,

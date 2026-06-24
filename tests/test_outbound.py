@@ -129,6 +129,36 @@ class TestOutboundCalling(unittest.TestCase):
         self.assertEqual(customers[1]["name"], "Bob")
         self.assertEqual(customers[1]["call_type"], "lead_followup") # fell back to lead_followup
 
+    def test_excel_parsing_marketing_and_defaults(self):
+        # Create a temp Excel file
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws.append(["Name", "Phone", "Product", "Purpose"])
+        ws.append(["Carol", "9999999999", None, "marketing"]) # Explicit marketing type
+        ws.append(["Dave", "8888888888", None, None]) # Missing product & type
+        wb.save("temp_test_marketing.xlsx")
+        
+        try:
+            # Parse it with custom defaults
+            customers = parse_excel_file(
+                "temp_test_marketing.xlsx", 
+                default_call_type="marketing", 
+                default_product="Default GPS Tracker"
+            )
+            
+            self.assertEqual(len(customers), 2)
+            self.assertEqual(customers[0]["name"], "Carol")
+            self.assertEqual(customers[0]["call_type"], "marketing")
+            self.assertEqual(customers[0]["product_interest"], "Default GPS Tracker") # defaulted
+            
+            self.assertEqual(customers[1]["name"], "Dave")
+            self.assertEqual(customers[1]["call_type"], "marketing") # defaulted
+            self.assertEqual(customers[1]["product_interest"], "Default GPS Tracker") # defaulted
+        finally:
+            if os.path.exists("temp_test_marketing.xlsx"):
+                os.remove("temp_test_marketing.xlsx")
+
     def test_excel_parsing_bad_headers(self):
         # Create a temp Excel file with missing Phone header
         wb = openpyxl.Workbook()

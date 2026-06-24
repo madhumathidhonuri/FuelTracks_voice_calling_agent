@@ -18,7 +18,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bulk_outbound_caller")
 
-def parse_excel_file(file_path: str) -> List[Dict[str, Any]]:
+def parse_excel_file(file_path: str, default_call_type: str = "lead_followup", default_product: str = None) -> List[Dict[str, Any]]:
     """
     Parses an Excel file containing customer data.
     Identifies headers case-insensitively and maps columns to customer details.
@@ -84,13 +84,13 @@ def parse_excel_file(file_path: str) -> List[Dict[str, Any]]:
             continue
 
         name = str(row[name_idx]).strip() if (name_idx != -1 and row[name_idx] is not None) else "Customer"
-        product = str(row[product_idx]).strip() if (product_idx != -1 and row[product_idx] is not None) else None
-        call_type = str(row[type_idx]).strip() if (type_idx != -1 and row[type_idx] is not None) else "lead_followup"
+        product = str(row[product_idx]).strip() if (product_idx != -1 and row[product_idx] is not None) else default_product
+        call_type = str(row[type_idx]).strip() if (type_idx != -1 and row[type_idx] is not None) else default_call_type
 
         # Validate call type
-        if call_type not in ["lead_followup", "support", "dealer_recruitment"]:
-            logger.warning(f"Row {row_num}: Invalid call type '{call_type}'. Defaulting to 'lead_followup'.")
-            call_type = "lead_followup"
+        if call_type not in ["lead_followup", "support", "dealer_recruitment", "marketing"]:
+            logger.warning(f"Row {row_num}: Invalid call type '{call_type}'. Defaulting to '{default_call_type}'.")
+            call_type = default_call_type
 
         customers.append({
             "name": name,
@@ -110,10 +110,32 @@ async def main_async():
         required=True, 
         help="Path to the Excel file containing customer data (.xlsx)"
     )
+    parser.add_argument(
+        "--type", "-t",
+        choices=["lead_followup", "support", "dealer_recruitment", "marketing"],
+        help="Default call type to use for the campaign if not specified in the Excel sheet."
+    )
+    parser.add_argument(
+        "--product", "-p",
+        help="Default product interest if not specified in the Excel sheet."
+    )
     args = parser.parse_args()
 
+    # Infer default call type from file name if not explicitly provided
+    default_call_type = args.type
+    if not default_call_type:
+        filename_lower = os.path.basename(args.file).lower()
+        if "marketing" in filename_lower or "promo" in filename_lower:
+            default_call_type = "marketing"
+        elif "support" in filename_lower or "service" in filename_lower:
+            default_call_type = "support"
+        elif "dealer" in filename_lower or "recruit" in filename_lower or "partner" in filename_lower:
+            default_call_type = "dealer_recruitment"
+        else:
+            default_call_type = "lead_followup"
+
     try:
-        customers = parse_excel_file(args.file)
+        customers = parse_excel_file(args.file, default_call_type=default_call_type, default_product=args.product)
     except Exception as e:
         logger.error(f"Error parsing Excel: {e}")
         sys.exit(1)

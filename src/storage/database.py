@@ -158,3 +158,14 @@ def get_call_logs(call_sid: str) -> dict:
         }
     finally:
         conn.close()
+
+def get_recent_calls(limit: int = 50) -> list:
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM calls ORDER BY start_time DESC LIMIT ?", (limit,))
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
