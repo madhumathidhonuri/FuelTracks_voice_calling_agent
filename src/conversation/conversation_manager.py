@@ -8,11 +8,12 @@ from src.storage.database import add_transcript_turn
 logger = logging.getLogger(__name__)
 
 BASE_IDENTITY = (
-    "You are calling on behalf of Fuel Tracks Technologies, a Hyderabad-based company "
+    "You are Shreya, calling on behalf of Fuel Tracks Technologies, a Hyderabad-based company "
     "providing GPS vehicle tracking and real-time fuel monitoring for fleets across "
     "Telangana, Andhra Pradesh, and India. You sound like a real, warm team member — "
-    "not a script reader. Keep sentences short and natural; this is a phone call, not "
-    "an email. Never make up pricing, exact delivery timelines, or technical specs you "
+    "not a script reader. Your name is Shreya; never output placeholders like '[Your Name]', "
+    "'[Agent Name]' or '[Company Name]'. Keep sentences short and natural; this is a phone call, "
+    "not an email. Never make up pricing, exact delivery timelines, or technical specs you "
     "weren't given — offer to have a human follow up instead.\n\n"
     "Crucial: In your very first turn (the initial welcoming greeting), you MUST ask "
     "the customer: 'Are you comfortable in English, or would you prefer Hindi or Telugu?' "
@@ -51,6 +52,15 @@ INSTRUCTIONS_DEALER = (
     "try to close the partnership on this call."
 )
 
+INSTRUCTIONS_MARKETING = (
+    "This call is a promotional introduction of our latest product: {product_interest}.\n\n"
+    "1. Greet warmly, confirm you are speaking with {customer_name}, and state you're calling from Fuel Tracks.\n"
+    "2. Explain that we just launched {product_interest} and highlight the main benefit (e.g., saves 15% on fuel costs, real-time alerts).\n"
+    "3. Ask if they are currently tracking their fleet or if they face fuel theft issues.\n"
+    "4. Goal: Ask for their permission to send a product brochure via WhatsApp or book a 5-minute video demo.\n"
+    "5. If they are not interested, thank them for their time and hang up politely. Never pressure."
+)
+
 CLOSE_INSTRUCTIONS = (
     "\n\nAlways close with: company contact — +91 9000666914, info@fueltracks.in — and thank them for their time."
 )
@@ -68,7 +78,7 @@ class ConversationManager:
     def initialize_call(self, call_type: str, context: Dict[str, Any] = None):
         """
         Set up the conversation state.
-        :param call_type: 'lead_followup', 'support', 'dealer_recruitment', or 'inbound_routing'
+        :param call_type: 'lead_followup', 'support', 'dealer_recruitment', 'marketing', or 'inbound_routing'
         """
         self.call_type = call_type
         self.context = context or {}
@@ -96,6 +106,10 @@ class ConversationManager:
             instructions += INSTRUCTIONS_SUPPORT
         elif self.call_type == "dealer_recruitment":
             instructions += INSTRUCTIONS_DEALER
+        elif self.call_type == "marketing":
+            prod = self.context.get("product_interest", "New GPS Tracker Pro")
+            cust = self.context.get("customer_name", "Valued Customer")
+            instructions += INSTRUCTIONS_MARKETING.format(product_interest=prod, customer_name=cust)
         else:
             # Fallback/routing instructions
             instructions += (

@@ -100,6 +100,10 @@ async def websocket_endpoint(
     finally:
         # Stop any running playback
         await turn_manager.stop_audio(session)
+        # Close pipeline queue tasks
+        if 'pipeline' in locals():
+            pipeline.close()
+            
         # Close the call session and commit metrics to SQLite
         if stream_sid:
             call_manager.close_session(stream_sid, outcome="completed")

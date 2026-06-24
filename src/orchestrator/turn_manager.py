@@ -11,10 +11,12 @@ class TurnManager:
         self.websocket = websocket
         self.playback_task: Optional[asyncio.Task] = None
         
-    async def play_audio(self, session: CallSession, pcm_data: bytes, sample_rate: int = 16000):
+    async def play_audio(self, session: CallSession, pcm_data: bytes, sample_rate: int = 16000, text: Optional[str] = None):
         """
         Start streaming audio back to Exotel in real time.
         """
+        if text:
+            logger.info(f"Playing audio for sentence: '{text}'")
         # Cancel any active playback first
         await self.stop_audio(session)
         

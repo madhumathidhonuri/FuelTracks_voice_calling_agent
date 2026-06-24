@@ -1,4 +1,16 @@
+# Environment variables (contains private API keys & credentials)
 .env
+
+# Python byte-code / cache directories
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Local databases
 *.db
+
+# Excel files (ignores all customer sheets except the format template)
 *.xlsx
+!customers_sample.xlsx

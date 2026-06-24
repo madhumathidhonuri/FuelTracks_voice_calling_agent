@@ -107,7 +107,8 @@ async def run_simulation():
     print("1. Outbound: Lead Follow-up (e.g., website enquiry)")
     print("2. Inbound: Support call (requires welcoming routing question first)")
     print("3. Outbound: Dealer Recruitment partner pitch")
-    choice = input("Enter choice (1-3): ").strip()
+    print("4. Outbound: New Product Marketing Pitch")
+    choice = input("Enter choice (1-4): ").strip()
     
     call_sid = f"sim-{uuid.uuid4().hex[:12]}"
     from_num = "+919876543210"
@@ -120,6 +121,10 @@ async def run_simulation():
         context["product_interest"] = input("Product [Default: Fuel Sensor]: ").strip() or "Fuel Sensor"
     elif choice == "3":
         call_type = "dealer_recruitment"
+    elif choice == "4":
+        call_type = "marketing"
+        context["customer_name"] = input("Customer Name [Default: Ramesh Kumar]: ").strip() or "Ramesh Kumar"
+        context["product_interest"] = input("Product [Default: GPS Tracker Pro]: ").strip() or "GPS Tracker Pro"
     else:
         call_type = "inbound_routing"
         
@@ -131,43 +136,38 @@ async def run_simulation():
         call_type=call_type
     )
     
-    # Setup WS simulator and pipeline
-    mock_ws = ConsoleMockWebSocket(call_sid)
-    stream_sid = f"stream-{uuid.uuid4().hex[:12]}"
-    session.link_stream(stream_sid)
-    mock_ws.stream_sid = stream_sid
-    
-    pipeline = AudioPipeline(session, None, sample_rate=16000)
-    
     # Override pipeline's turn_manager.play_audio to show the text in console
     class ConsoleTurnManager:
-        async def play_audio(self, session, pcm_data, sample_rate):
-            # We don't stream real PCM to console, we just flag play active
+        async def play_audio(self, session, pcm_data, sample_rate, text=None):
             session.is_playing = True
             session.barge_in_triggered = False
-            # Wait briefly to simulate playing
-            await asyncio.sleep(0.5)
+            if text:
+                print(f"\n🤖 Agent: {text}")
+            # Play the audio chunk asynchronously in a separate thread to avoid blocking the event loop
+            await asyncio.to_thread(play_pcm_on_windows, pcm_data, sample_rate)
             session.is_playing = False
             
         async def stop_audio(self, session):
             session.is_playing = False
             print("\n🚨 [SYSTEM EVENT: Audio Playback Stopped] 🚨")
             
-    pipeline.turn_manager = ConsoleTurnManager()
+    # Setup WS simulator and pipeline
+    mock_ws = ConsoleMockWebSocket(call_sid)
+    stream_sid = f"stream-{uuid.uuid4().hex[:12]}"
+    session.conversation_manager.context = context
+    session.link_stream(stream_sid)
+    mock_ws.stream_sid = stream_sid
+    
+    console_turn_mgr = ConsoleTurnManager()
+    pipeline = AudioPipeline(session, console_turn_mgr, sample_rate=16000)
     
     # Trigger initial agent welcome response
     print("\n--- AGENT CONNECTS ---")
-    response_text, token_usage = await session.conversation_manager.generate_agent_response()
-    session.llm_tokens_logged += token_usage.get("prompt_tokens", 0) + token_usage.get("completion_tokens", 0)
+    await pipeline.trigger_initial_greeting()
     
-    # Generate TTS parameters for greeting cost logging
-    greeting_lang = session.conversation_manager.language_profile.primary_language
-    pcm_bytes, sample_rate, num_chars = await pipeline.tts_client.text_to_speech(response_text, greeting_lang)
-    session.tts_characters_logged += num_chars
-    
-    print(f"\n🤖 Agent ({greeting_lang}): {response_text}")
-    print(f"   [TTS Logged: {num_chars} chars | LLM Tokens: {token_usage}]")
-    play_pcm_on_windows(pcm_bytes, sample_rate)
+    # Wait for the welcome greeting playback to finish
+    while pipeline.session.is_playing or not pipeline.playback_queue.empty() or not pipeline.tts_queue.empty() or len(pipeline.active_tasks) > 0:
+        await asyncio.sleep(0.1)
     
     # Loop conversations
     while True:
@@ -246,21 +246,19 @@ async def run_simulation():
         if session.call_type != call_type:
             print(f"   🔀 call_type dynamically classified as: {session.call_type}")
             
-        # Generate response
-        print("🤖 Agent is thinking...")
-        response_text, token_usage = await session.conversation_manager.generate_agent_response()
-        session.llm_tokens_logged += token_usage.get("prompt_tokens", 0) + token_usage.get("completion_tokens", 0)
+        # Trigger streaming response!
+        print("🤖 Agent is thinking (streaming response)...")
+        # Spin off the streaming LLM response task
+        task = asyncio.create_task(pipeline._process_llm_stream())
+        pipeline.active_tasks.add(task)
+        task.add_done_callback(pipeline.active_tasks.discard)
         
-        # Generate TTS audio bytes for billing logging
-        current_lang = profile.primary_language
-        pcm_bytes, sample_rate, num_chars = await pipeline.tts_client.text_to_speech(response_text, current_lang)
-        session.tts_characters_logged += num_chars
-        
-        print(f"\n🤖 Agent ({current_lang}): {response_text}")
-        print(f"   [TTS Logged: {num_chars} chars | LLM Tokens: {token_usage}]")
-        play_pcm_on_windows(pcm_bytes, sample_rate)
-        
-    # Close session
+        # Wait for the response to finish streaming and playing
+        while pipeline.session.is_playing or not pipeline.playback_queue.empty() or not pipeline.tts_queue.empty() or len(pipeline.active_tasks) > 0:
+            await asyncio.sleep(0.1)
+            
+    # Close pipeline and session
+    pipeline.close()
     call_manager.close_session(stream_sid, outcome="completed")
     print("\n" + "=" * 60)
     print("                      CALL TERMINATED")

@@ -148,14 +148,14 @@ async def main_async():
             )
             
             if result.get("success"):
-                print(f"  ✓ SUCCESS: Call SID: {result['call_sid']} (Status: {result['status']})")
+                print(f"  [SUCCESS] Call SID: {result['call_sid']} (Status: {result['status']})")
                 success_count += 1
             else:
-                print(f"  ✗ FAILED: {result.get('error')} (Status Code: {result.get('status_code', 'N/A')})")
+                print(f"  [FAILED] {result.get('error')} (Status Code: {result.get('status_code', 'N/A')})")
                 failed_count += 1
                 
         except Exception as e:
-            print(f"  ✗ ERROR: Unexpected exception: {e}")
+            print(f"  [ERROR] Unexpected exception: {e}")
             failed_count += 1
 
         # Small delay between triggering calls to avoid spamming the gateway
