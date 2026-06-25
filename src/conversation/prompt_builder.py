@@ -86,6 +86,16 @@ def build_system_prompt(
     full_instructions = company_specific_instructions
     if style_notes:
         full_instructions += f"\n\n[STYLE GUIDELINE]\n{style_notes}"
+        
+    # Strict language enforcement directive
+    if primary_lang_name != "English":
+        strict_directive = (
+            f"\n\n[MANDATORY LANGUAGE RULE]\n"
+            f"You MUST write your entire response in {primary_lang_name} (using {primary_lang_name} script). "
+            f"Do NOT output English sentences or English replies (such as 'Okay, Telugu it is' or 'Great, thank you for letting me know' in English). "
+            f"Switch immediately and completely to {primary_lang_name} script right now."
+        )
+        full_instructions += strict_directive
 
     # 4. Interpolate template
     try:

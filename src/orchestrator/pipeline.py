@@ -37,11 +37,11 @@ class AudioPipeline:
         # Audio buffer for accumulating customer speech
         self.audio_buffer = bytearray()
         
-        # VAD settings: 800 RMS threshold, 1.0s silence timeout
+        # VAD settings: 800 RMS threshold, 600ms silence timeout for faster responses
         self.vad = VoiceActivityDetector(
             sample_rate=sample_rate, 
             threshold=800.0, 
-            silence_timeout_ms=1000
+            silence_timeout_ms=600
         )
         
         # API Clients
@@ -65,6 +65,13 @@ class AudioPipeline:
         
         # Barge-in counter
         self.barge_in_counter = 0
+        
+        # Explicit turn tracking to serialize conversational states
+        self.processing_turn = False
+        
+        # Automatic hangup state tracking
+        self.session.should_hangup = False
+        self.session.should_hangup_pending = False
 
     def close(self):
         """
@@ -81,16 +88,62 @@ class AudioPipeline:
 
     async def trigger_initial_greeting(self):
         """
-        Generate and play the agent's first welcome turn using LLM streaming.
+        Directly queue the pre-defined welcome greeting for TTS to minimize pickup latency.
         """
         try:
-            logger.info(f"Triggering initial welcome streaming for call {self.session.call_sid}...")
-            # Spin off the streaming LLM response task directly (since history is empty)
-            task = asyncio.create_task(self._process_llm_stream())
-            self.active_tasks.add(task)
-            task.add_done_callback(self.active_tasks.discard)
+            logger.info(f"Triggering initial welcoming greeting for call {self.session.call_sid}...")
+            self.processing_turn = True
+            
+            context = self.session.conversation_manager.context
+            customer_name = context.get("customer_name")
+            
+            sentences = []
+            from datetime import datetime
+            hour = datetime.now().hour
+            if 5 <= hour < 12:
+                tod = "good morning"
+            elif 12 <= hour < 17:
+                tod = "good afternoon"
+            elif 17 <= hour < 22:
+                tod = "good evening"
+            else:
+                tod = "hello"
+
+            if self.session.call_type == "inbound_routing":
+                sentences.append(f"Hello, {tod}! Thank you for calling Fuel Tracks Technologies.")
+                sentences.append("My name is Shreya.")
+                sentences.append("Are you calling about an existing account, or are you interested in GPS tracking for your fleet?")
+            else:
+                sentences.append(f"Hello, {tod}!")
+                if customer_name and customer_name.strip() and customer_name != "Valued Customer":
+                    sentences.append(f"Am I speaking with {customer_name.strip()}?")
+                else:
+                    sentences.append("How can I help you today?")
+                
+            full_greeting = " ".join(sentences)
+            
+            # Log greeting to conversation history and database
+            self.session.conversation_manager.history.append({"role": "agent", "content": full_greeting})
+            add_transcript_turn(self.session.call_sid, "agent", full_greeting)
+            
+            # Enqueue each sentence directly for TTS synthesis concurrently
+            tts_lang = self.session.conversation_manager.language_profile.primary_language
+            for sentence in sentences:
+                logger.info(f"Starting initial welcoming TTS task for: '{sentence}'")
+                task = asyncio.create_task(
+                    self.tts_client.text_to_speech(
+                        text=sentence,
+                        language_code=tts_lang,
+                        speaker="shreya"
+                    )
+                )
+                self.active_tasks.add(task)
+                task.add_done_callback(self.active_tasks.discard)
+                await self.tts_queue.put((task, sentence))
+                
         except Exception as e:
             logger.exception(f"Error during initial welcome trigger: {e}")
+            self.processing_turn = False
 
     async def process_inbound_audio(self, audio_chunk: bytes):
         """
@@ -98,21 +151,27 @@ class AudioPipeline:
         """
         self.session.touch()
         
-        # 1. Check for barge-in if the agent is speaking
-        if self.session.is_playing:
+        # 1. Check for barge-in if the agent is active
+        if self.processing_turn:
+                
+            # Process chunks into VAD so we don't lose the customer's interruption speech
+            is_speech_active, speech_stopped_now = self.vad.process_chunk(audio_chunk)
+            if is_speech_active:
+                self.audio_buffer.extend(audio_chunk)
+                
             rms = calculate_rms(audio_chunk)
-            if rms > 1200.0:  # Barge-in threshold
+            if rms > 2200.0:  # Raised threshold to ignore minor line noise/breathing
                 self.barge_in_counter += 1
-                if self.barge_in_counter >= 2:  # Sustained speech (~200ms)
-                    logger.info(f"Barge-in detected on call {self.session.call_sid}! Interrupting playback.")
+                if self.barge_in_counter >= 8:  # Requires sustained speech (~160ms at 20ms chunks)
+                    logger.info(f"Barge-in detected on call {self.session.call_sid}! Interrupting playback/generation.")
                     self.session.barge_in_triggered = True
                     await self.turn_manager.stop_audio(self.session)
                     
                     # Stop active generation/synthesis and flush queues
                     self._clear_realtime_queues()
                     
-                    self.audio_buffer.clear()
-                    self.vad.reset()
+                    # Note: We do NOT clear self.audio_buffer or reset VAD here.
+                    # We let the VAD continue accumulating the rest of their utterance.
                     self.barge_in_counter = 0
             else:
                 self.barge_in_counter = max(0, self.barge_in_counter - 1)
@@ -131,6 +190,7 @@ class AudioPipeline:
             self.audio_buffer.clear()
             self.vad.reset()
             
+            self.processing_turn = True
             # Put utterance on STT queue
             self.stt_queue.put_nowait(utterance_audio)
 
@@ -139,6 +199,8 @@ class AudioPipeline:
         Clears all pending sentence and audio playback queues, and cancels current API requests.
         """
         logger.info(f"Clearing real-time queues for call {self.session.call_sid} due to barge-in.")
+        
+        self.processing_turn = False
         
         # Cancel all active token streaming / synthesis tasks
         for task in list(self.active_tasks):
@@ -170,6 +232,9 @@ class AudioPipeline:
             try:
                 audio_data = await self.stt_queue.get()
                 
+                # Reset barge-in flag before transcribing, because any barge-in during/after this point is a new interruption.
+                self.session.barge_in_triggered = False
+                
                 # Transcribe
                 transcript, detected_lang, confidence, duration_sec = await self.stt_client.transcribe(
                     audio_data, 
@@ -178,7 +243,16 @@ class AudioPipeline:
                 self.session.stt_seconds_logged += duration_sec
                 logger.info(f"STT: '{transcript}' [Lang: {detected_lang}, Conf: {confidence:.2f}, Dur: {duration_sec:.2f}s]")
                 
-                if not transcript.strip():
+                # If a barge-in happened while we were transcribing (customer started speaking again), discard this old turn
+                if self.session.barge_in_triggered:
+                    logger.info("Barge-in triggered during STT transcription. Discarding old transcript.")
+                    self.stt_queue.task_done()
+                    continue
+                    
+                if not transcript.strip() or confidence < 0.30:
+                    if confidence < 0.30 and transcript.strip():
+                        logger.info(f"Ignoring low-confidence STT transcript: '{transcript}' (confidence: {confidence:.2f})")
+                    self.processing_turn = False
                     self.stt_queue.task_done()
                     continue
                     
@@ -199,6 +273,7 @@ class AudioPipeline:
                 break
             except Exception as e:
                 logger.exception(f"Error in STT worker: {e}")
+                self.processing_turn = False
 
     async def _process_llm_stream(self):
         """
@@ -224,6 +299,18 @@ class AudioPipeline:
                 company_specific_instructions=system_prompt
             )
             
+            # Check if call duration is approaching the 1-2 minute limit
+            from datetime import datetime
+            elapsed_sec = (datetime.now() - self.session.start_time).total_seconds()
+            if elapsed_sec > 75.0:
+                logger.info(f"Soft limit reached ({elapsed_sec:.1f}s). Appending wrap-up instructions to prompt.")
+                system_prompt += (
+                    "\n\n[CRITICAL DIRECTIVE: The call is reaching its duration limit. "
+                    "You must immediately and politely wrap up the call. Do not start new topics. "
+                    "Offer to send details/brochures on WhatsApp, provide our contact details "
+                    "(+91 9000666914, info@fueltracks.in), thank them, and say goodbye now.]"
+                )
+            
             text_buffer = ""
             full_response = ""
             final_token_usage = None
@@ -238,21 +325,52 @@ class AudioPipeline:
                     full_response += chunk
                     # Split sentences
                     sentences, text_buffer = extract_sentences(text_buffer)
+                    tts_lang = self.session.conversation_manager.language_profile.primary_language
                     for sentence in sentences:
-                        logger.info(f"Enqueuing sentence for TTS: '{sentence}'")
-                        await self.tts_queue.put(sentence)
+                        logger.info(f"Starting concurrent TTS task for sentence: '{sentence}'")
+                        task = asyncio.create_task(
+                            self.tts_client.text_to_speech(
+                                text=sentence,
+                                language_code=tts_lang,
+                                speaker="shreya"
+                            )
+                        )
+                        self.active_tasks.add(task)
+                        task.add_done_callback(self.active_tasks.discard)
+                        await self.tts_queue.put((task, sentence))
                 if usage:
                     final_token_usage = usage
             
             # Flush final sentence if any remaining text
             if text_buffer.strip():
-                logger.info(f"Flushing final sentence for TTS: '{text_buffer.strip()}'")
-                await self.tts_queue.put(text_buffer.strip())
+                sentence = text_buffer.strip()
+                logger.info(f"Flushing final sentence and starting TTS task for: '{sentence}'")
+                tts_lang = self.session.conversation_manager.language_profile.primary_language
+                task = asyncio.create_task(
+                    self.tts_client.text_to_speech(
+                        text=sentence,
+                        language_code=tts_lang,
+                        speaker="shreya"
+                    )
+                )
+                self.active_tasks.add(task)
+                task.add_done_callback(self.active_tasks.discard)
+                await self.tts_queue.put((task, sentence))
                 
             # Log full agent turn in history and DB
             if full_response.strip():
                 self.session.conversation_manager.history.append({"role": "agent", "content": full_response.strip()})
                 add_transcript_turn(self.session.call_sid, "agent", full_response.strip())
+                
+                # Check for goodbye/call completion to trigger automatic hangup
+                lower_resp = full_response.lower()
+                goodbye_keywords = ["goodbye", "bye now", "have a great day", "have a nice day", "thank you for your time", "shubhadin", "dhanyavadalu", "selavu", "thank you, bye", "phir milenge", "alvida", "dhanyawad"]
+                if any(kw in lower_resp for kw in goodbye_keywords):
+                    logger.info(f"Goodbye detected in agent response. Session {self.session.call_sid} marked for hangup.")
+                    self.session.should_hangup_pending = True
+            else:
+                logger.warning("LLM response was empty. Resetting processing_turn.")
+                self.processing_turn = False
                 
             # Save token usage metrics
             if final_token_usage:
@@ -263,45 +381,60 @@ class AudioPipeline:
             logger.info("LLM stream generation task was cancelled.")
         except Exception as e:
             logger.exception(f"Error in LLM stream task: {e}")
+            self.processing_turn = False
 
     async def _tts_worker(self):
         """
-        Worker task to synthesize complete sentences sequentially.
+        Worker task to process pre-spawned TTS synthesis tasks in order.
         """
         while True:
             try:
-                sentence = await self.tts_queue.get()
+                task, sentence = await self.tts_queue.get()
                 
-                lang_profile = self.session.conversation_manager.language_profile
-                tts_lang = lang_profile.primary_language
+                try:
+                    tts_audio, tts_sample_rate, num_chars = await task
+                except asyncio.CancelledError:
+                    logger.info(f"TTS task was cancelled for sentence: '{sentence}'")
+                    self.tts_queue.task_done()
+                    continue
                 
-                logger.info(f"Synthesizing sentence: '{sentence}' in {tts_lang}...")
-                
-                # Run TTS as subtask so it is cancellable
-                task = asyncio.create_task(
-                    self.tts_client.text_to_speech(
-                        text=sentence,
-                        language_code=tts_lang,
-                        speaker="shreya"
-                    )
-                )
-                self.active_tasks.add(task)
-                task.add_done_callback(self.active_tasks.discard)
-                
-                tts_audio, tts_sample_rate, num_chars = await task
                 self.session.tts_characters_logged += num_chars
                 
                 if tts_audio:
+                    if tts_sample_rate != self.sample_rate:
+                        logger.info(f"Resampling TTS audio from {tts_sample_rate} Hz to {self.sample_rate} Hz for Exotel...")
+                        import numpy as np
+                        samples = np.frombuffer(tts_audio, dtype=np.int16)
+                        if len(samples) > 0:
+                            if tts_sample_rate > self.sample_rate:
+                                # Apply low-pass filter to prevent aliasing
+                                window_size = int(round(tts_sample_rate / self.sample_rate))
+                                if window_size > 1:
+                                    kernel = np.ones(window_size) / window_size
+                                    samples = np.convolve(samples, kernel, mode='same').astype(np.int16)
+                            
+                            num_samples = len(samples)
+                            target_num_samples = int(num_samples * self.sample_rate / tts_sample_rate)
+                            src_indices = np.arange(num_samples)
+                            target_indices = np.linspace(0, num_samples - 1, target_num_samples)
+                            resampled_samples = np.interp(target_indices, src_indices, samples).astype(np.int16)
+                            tts_audio = resampled_samples.tobytes()
+                        tts_sample_rate = self.sample_rate
+
                     logger.info(f"Enqueuing synthesized audio for: '{sentence}'")
                     await self.playback_queue.put((tts_audio, tts_sample_rate, sentence))
                 else:
                     logger.error(f"TTS synthesis failed for sentence: '{sentence}'")
+                    if self.tts_queue.empty() and self.playback_queue.empty() and len(self.active_tasks) == 0:
+                        logger.info("TTS failed and no other sentences. Resetting processing_turn.")
+                        self.processing_turn = False
                     
                 self.tts_queue.task_done()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.exception(f"Error in TTS worker: {e}")
+                self.processing_turn = False
 
     async def _playback_worker(self):
         """
@@ -320,7 +453,17 @@ class AudioPipeline:
                 )
                 
                 self.playback_queue.task_done()
+                
+                if self.playback_queue.empty() and self.tts_queue.empty() and len(self.active_tasks) == 0:
+                    logger.info("Agent finished speaking all queued sentences. Resetting processing_turn flag and VAD buffer.")
+                    self.processing_turn = False
+                    self.audio_buffer.clear()
+                    self.vad.reset()
+                    if getattr(self.session, "should_hangup_pending", False):
+                        logger.info("Goodbye playback completed. Setting should_hangup flag to True.")
+                        self.session.should_hangup = True
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.exception(f"Error in playback worker: {e}")
+                self.processing_turn = False

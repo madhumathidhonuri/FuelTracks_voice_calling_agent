@@ -18,10 +18,10 @@ class LanguageProfile:
             
         # Check for explicit language preference mentions in customer transcript
         lower_transcript = transcript.lower()
-        if "telugu" in lower_transcript:
+        if "telugu" in lower_transcript or "తెలుగు" in lower_transcript:
             detected_language = "te-IN"
             confidence = 1.0
-        elif "hindi" in lower_transcript:
+        elif "hindi" in lower_transcript or "हिंदी" in lower_transcript or "हिन्दी" in lower_transcript:
             detected_language = "hi-IN"
             confidence = 1.0
         elif "english" in lower_transcript:
@@ -41,6 +41,8 @@ class LanguageProfile:
         lang_stats = {}
         for idx, turn in enumerate(recent_turns):
             lang = turn["detected_language"]
+            if lang not in ["en-IN", "hi-IN", "te-IN"]:
+                continue
             if lang not in lang_stats:
                 lang_stats[lang] = {"count": 0, "last_index": idx}
             lang_stats[lang]["count"] += 1

@@ -5,6 +5,8 @@ import httpx
 import logging
 from typing import Tuple
 from config.settings import settings
+from src.audio.dns_resolver import resolve_hostname_ipv4
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +38,13 @@ def extract_pcm_from_wav(wav_bytes: bytes) -> Tuple[bytes, int]:
     return wav_bytes, 16000
 
 class SarvamTTSClient:
+    _client = None
+
     def __init__(self):
         self.api_key = settings.SARVAM_API_KEY
         self.api_url = "https://api.sarvam.ai/text-to-speech"
+        if SarvamTTSClient._client is None:
+            SarvamTTSClient._client = httpx.AsyncClient(timeout=30.0)
         
     async def text_to_speech(
         self, 
@@ -89,31 +95,42 @@ class SarvamTTSClient:
         }
         
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(self.api_url, headers=headers, json=payload)
+            parsed_url = urlparse(self.api_url)
+            hostname = parsed_url.hostname or "api.sarvam.ai"
+            port = parsed_url.port or (443 if parsed_url.scheme == "https" else 80)
+            resolved_ip = await resolve_hostname_ipv4(hostname)
+            
+            response = await self._client.post(
+                self.api_url, 
+                headers=headers, 
+                json=payload,
+                extensions={"network_address": (resolved_ip, port)}
+            )
+            if response.status_code != 200:
+                logger.error(f"Sarvam TTS failed with status {response.status_code}: {response.text}")
+                logger.warning("Sarvam TTS API failed. Falling back to 1s of mock silent audio to prevent conversation deadlock.")
+                return b"\x00" * 32000, 16000, num_chars
                 
-                if response.status_code != 200:
-                    logger.error(f"Sarvam TTS failed with status {response.status_code}: {response.text}")
-                    return b"", 16000, 0
-                    
-                result = response.json()
+            result = response.json()
+            
+            # Check for "audios" array or fallback "audio_content"
+            audios = result.get("audios")
+            if audios and isinstance(audios, list) and len(audios) > 0:
+                audio_b64 = audios[0]
+            else:
+                audio_b64 = result.get("audio_content", "")
+            
+            if not audio_b64:
+                logger.error(f"Sarvam TTS response empty. Keys in response: {list(result.keys())}")
+                logger.warning("Sarvam TTS API returned empty content. Falling back to 1s of mock silent audio.")
+                return b"\x00" * 32000, 16000, num_chars
                 
-                # Check for "audios" array or fallback "audio_content"
-                audios = result.get("audios")
-                if audios and isinstance(audios, list) and len(audios) > 0:
-                    audio_b64 = audios[0]
-                else:
-                    audio_b64 = result.get("audio_content", "")
-                
-                if not audio_b64:
-                    logger.error(f"Sarvam TTS response empty. Keys in response: {list(result.keys())}")
-                    return b"", 16000, 0
-                    
-                audio_bytes = base64.b64decode(audio_b64)
-                pcm_bytes, sample_rate = extract_pcm_from_wav(audio_bytes)
-                
-                return pcm_bytes, sample_rate, num_chars
+            audio_bytes = base64.b64decode(audio_b64)
+            pcm_bytes, sample_rate = extract_pcm_from_wav(audio_bytes)
+            
+            return pcm_bytes, sample_rate, num_chars
                 
         except Exception as e:
             logger.exception(f"Error during Sarvam TTS generation: {e}")
-            return b"", 16000, 0
+            logger.warning("Exception in Sarvam TTS API. Falling back to 1s of mock silent audio to prevent conversation deadlock.")
+            return b"\x00" * 32000, 16000, num_chars

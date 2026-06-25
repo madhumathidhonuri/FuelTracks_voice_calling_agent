@@ -22,16 +22,27 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
-        logging.StreamHandler()
+        logging.StreamHandler(),
+        logging.FileHandler("server.log", encoding="utf-8")
     ]
 )
 logger = logging.getLogger(__name__)
+
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Initializing SQLite pilot database...")
+    init_db()
+    logger.info("Database initialized successfully.")
+    yield
 
 # Initialize FastAPI App
 app = FastAPI(
     title="Multilingual Voice Calling Agent API",
     description="Production-ready voice agent backend for Exotel + Sarvam AI",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Enable CORS for testing
@@ -42,13 +53,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Initialize Database on Startup
-@app.on_event("startup")
-def startup_event():
-    logger.info("Initializing SQLite pilot database...")
-    init_db()
-    logger.info("Database initialized successfully.")
 
 # Global campaign state
 campaign_status = {

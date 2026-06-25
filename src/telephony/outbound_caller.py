@@ -4,6 +4,8 @@ import httpx
 from typing import Dict, Any, Optional
 from config.settings import settings
 from src.storage.database import create_call
+from src.audio.dns_resolver import resolve_hostname_ipv4
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +121,18 @@ class OutboundCaller:
 
         async with httpx.AsyncClient() as client:
             try:
-                response = await client.post(url, data=data, auth=auth, timeout=10.0)
+                parsed_url = urlparse(self.api_url)
+                hostname = parsed_url.hostname or "api.exotel.com"
+                port = parsed_url.port or (443 if parsed_url.scheme == "https" else 80)
+                resolved_ip = await resolve_hostname_ipv4(hostname)
+                
+                response = await client.post(
+                    url, 
+                    data=data, 
+                    auth=auth, 
+                    timeout=10.0,
+                    extensions={"network_address": (resolved_ip, port)}
+                )
                 
                 # Check for HTTP Errors
                 if response.status_code != 200:

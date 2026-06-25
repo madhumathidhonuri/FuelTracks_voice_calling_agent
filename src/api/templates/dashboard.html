@@ -116,14 +116,27 @@
 
         .grid-layout {
             display: grid;
-            grid-template-columns: 1.2fr 0.8fr;
-            gap: 2rem;
+            grid-template-columns: 1.1fr 1fr 1.2fr;
+            gap: 1.5rem;
             margin-bottom: 2rem;
+            align-items: start;
         }
 
-        @media (max-width: 1024px) {
+        @media (max-width: 1200px) {
+            .grid-layout {
+                grid-template-columns: 1fr 1fr;
+            }
+            .grid-layout > div:nth-child(3) {
+                grid-column: span 2;
+            }
+        }
+
+        @media (max-width: 768px) {
             .grid-layout {
                 grid-template-columns: 1fr;
+            }
+            .grid-layout > div:nth-child(3) {
+                grid-column: span 1;
             }
         }
 
@@ -443,8 +456,28 @@
             transition: background-color 0.2s ease;
         }
 
-        .clickable-row:hover td {
-            background: rgba(99, 102, 241, 0.08) !important;
+        .call-card {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 1rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .call-card:hover {
+            background: rgba(99, 102, 241, 0.05);
+            border-color: rgba(99, 102, 241, 0.25);
+            transform: translateY(-1px);
+        }
+
+        .call-card.active {
+            background: rgba(99, 102, 241, 0.1);
+            border-color: var(--primary);
+            box-shadow: 0 0 12px var(--primary-glow);
         }
 
         /* Transcript Modal/Panel */
@@ -612,8 +645,8 @@
         </header>
 
         <div class="grid-layout">
-            <!-- Left Side: Campaign Upload and Execution -->
-            <div style="display: flex; flex-direction: column; gap: 2rem;">
+            <!-- Column 1: Campaign Management -->
+            <div style="display: flex; flex-direction: column; gap: 1.5rem;">
                 <!-- Upload Card -->
                 <div class="card">
                     <h2 class="card-title">
@@ -680,41 +713,6 @@
                     </div>
                 </div>
 
-                <!-- Recent Call Logs Card -->
-                <div class="card">
-                    <div class="list-header">
-                        <h2 class="card-title" style="margin-bottom: 0;">
-                            <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-                            Call Analytics Log
-                        </h2>
-                        <button class="btn btn-secondary" style="width: auto; padding: 0.4rem 0.8rem; font-size: 0.8rem;" onclick="loadRecentCalls()">
-                            <svg class="icon" viewBox="0 0 24 24"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
-                            Refresh
-                        </button>
-                    </div>
-
-                    <div class="table-container" style="max-height: 400px;">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Call SID</th>
-                                    <th>Recipient</th>
-                                    <th>Date & Time</th>
-                                    <th>Duration</th>
-                                    <th>Campaign</th>
-                                    <th>Outcome</th>
-                                </tr>
-                            </thead>
-                            <tbody id="recent-calls-body">
-                                <!-- Dynamic rows -->
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Right Side: Live Monitoring & Active Transcript -->
-            <div style="display: flex; flex-direction: column; gap: 2rem; position: sticky; top: 2rem; height: max-content;">
                 <!-- Campaign Live Progress -->
                 <div class="card" id="campaign-progress-card" style="display: none;">
                     <h2 class="card-title">
@@ -756,7 +754,30 @@
                         </div>
                     </div>
                 </div>
+            </div>
 
+            <!-- Column 2: Recent Call Logs Card -->
+            <div style="display: flex; flex-direction: column; gap: 1.5rem;">
+                <div class="card">
+                    <div class="list-header">
+                        <h2 class="card-title" style="margin-bottom: 0;">
+                            <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                            Call Analytics Log
+                        </h2>
+                        <button class="btn btn-secondary" style="width: auto; padding: 0.4rem 0.8rem; font-size: 0.8rem;" onclick="loadRecentCalls()">
+                            <svg class="icon" viewBox="0 0 24 24"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                            Refresh
+                        </button>
+                    </div>
+
+                    <div id="recent-calls-list" style="max-height: 600px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.75rem; margin-top: 1.5rem; padding-right: 4px;">
+                        <!-- Dynamic call cards -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Column 3: Live Transcript -->
+            <div style="display: flex; flex-direction: column; gap: 1.5rem; position: sticky; top: 2rem;">
                 <!-- Call Transcript View -->
                 <div class="transcript-drawer">
                     <div class="transcript-header">
@@ -772,7 +793,7 @@
                             <span class="placeholder-icon">
                                 <svg style="width: 48px; height: 48px;" class="icon" viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
                             </span>
-                            <p>Click on any call in the list below to read the detailed dialogue and metrics log.</p>
+                            <p>Click on any call in the list to read the detailed dialogue and metrics log.</p>
                         </div>
                         <!-- Transcript bubbles will appear here -->
                     </div>
@@ -973,23 +994,26 @@
                 const response = await fetch('/api/calls/recent');
                 const calls = await response.json();
                 
-                const tbody = document.getElementById('recent-calls-body');
-                tbody.innerHTML = '';
+                const listContainer = document.getElementById('recent-calls-list');
+                listContainer.innerHTML = '';
                 
                 if (calls.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 2rem;">No recent calls found in database.</td></tr>`;
+                    listContainer.innerHTML = `<div class="placeholder-text" style="padding: 2rem;"><p>No recent calls found in database.</p></div>`;
                     return;
                 }
 
                 calls.forEach(c => {
-                    const tr = document.createElement('tr');
-                    tr.className = 'clickable-row';
-                    tr.onclick = () => selectCall(c.call_sid);
-                    if (selectedCallSid === c.call_sid) {
-                        tr.style.background = 'rgba(99, 102, 241, 0.12)';
-                    }
+                    const card = document.createElement('div');
+                    card.className = `call-card ${selectedCallSid === c.call_sid ? 'active' : ''}`;
+                    card.setAttribute('data-call-sid', c.call_sid);
+                    card.onclick = () => selectCall(c.call_sid);
                     
-                    const startTime = new Date(c.start_time).toLocaleString();
+                    const startTime = new Date(c.start_time).toLocaleString(undefined, {
+                        month: 'short',
+                        day: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                    });
                     const durationStr = c.duration ? Math.round(c.duration) + 's' : 'Ongoing';
                     
                     let badgeClass = 'badge-blue';
@@ -1001,15 +1025,20 @@
                     if (c.outcome === 'completed' || c.outcome === 'terminal' || c.outcome === 'hangup') outcomeClass = 'status-completed';
                     else if (c.outcome === 'failed' || c.outcome === 'no-answer' || c.outcome === 'busy') outcomeClass = 'status-failed';
 
-                    tr.innerHTML = `
-                        <td style="font-family: monospace; font-size: 0.8rem;">${c.call_sid.substring(0, 12)}...</td>
-                        <td><strong>${c.from_number}</strong></td>
-                        <td style="font-size: 0.8rem; color: var(--text-muted);">${startTime}</td>
-                        <td>${durationStr}</td>
-                        <td><span class="badge ${badgeClass}">${c.call_type.replace('_', ' ')}</span></td>
-                        <td><span class="badge" style="text-transform: capitalize; border: none; padding:0;"><span class="${outcomeClass}" style="font-weight: 600;">●</span> ${c.outcome}</span></td>
+                    card.innerHTML = `
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <span style="font-weight: 600; font-size: 0.95rem; color: var(--text-color);">${c.from_number}</span>
+                            <span class="badge ${badgeClass}">${c.call_type.replace('_', ' ')}</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.8rem; color: var(--text-muted);">
+                            <span>${startTime}</span>
+                            <div style="display: flex; align-items: center; gap: 0.35rem;">
+                                <span class="${outcomeClass}">●</span>
+                                <span style="text-transform: capitalize; font-weight: 500;">${c.outcome} (${durationStr})</span>
+                            </div>
+                        </div>
                     `;
-                    tbody.appendChild(tr);
+                    listContainer.appendChild(card);
                 });
             } catch (err) {
                 console.error(err);
@@ -1019,9 +1048,15 @@
         function selectCall(callSid) {
             selectedCallSid = callSid;
             
-            // Highlight selected row in table
-            const rows = document.querySelectorAll('.clickable-row');
-            loadRecentCalls(); // Will re-render with highlight
+            // Highlight selected card
+            const cards = document.querySelectorAll('.call-card');
+            cards.forEach(card => {
+                if (card.getAttribute('data-call-sid') === callSid) {
+                    card.classList.add('active');
+                } else {
+                    card.classList.remove('active');
+                }
+            });
             
             // Show badge
             const badge = document.getElementById('transcript-call-type');

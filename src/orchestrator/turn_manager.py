@@ -17,8 +17,9 @@ class TurnManager:
         """
         if text:
             logger.info(f"Playing audio for sentence: '{text}'")
-        # Cancel any active playback first
-        await self.stop_audio(session)
+        # Cancel any active playback first if running
+        if self.playback_task and not self.playback_task.done():
+            await self.stop_audio(session)
         
         session.is_playing = True
         session.barge_in_triggered = False
@@ -50,6 +51,8 @@ class TurnManager:
             num_chunks += 1
             
         stream_sid = session.stream_sid
+        import time
+        start_time = time.time()
         
         for i in range(num_chunks):
             # Check if barge-in was triggered while we were sleeping
@@ -78,24 +81,31 @@ class TurnManager:
                 logger.error(f"Failed to send media frame to Exotel: {e}")
                 break
                 
-            # Stream chunk at real-time rate (every 100ms)
-            await asyncio.sleep(0.100)
+            # Drift-corrected sleep to maintain smooth real-time stream playback
+            target_time = start_time + (i + 1) * 0.100
+            sleep_duration = target_time - time.time()
+            if sleep_duration > 0:
+                await asyncio.sleep(sleep_duration)
             
     async def stop_audio(self, session: CallSession):
         """
         Stops the playback task and sends a clear event to wipe Exotel's output buffer.
         """
+        was_running = False
         if self.playback_task and not self.playback_task.done():
             self.playback_task.cancel()
+            was_running = True
             try:
                 await self.playback_task
+            except asyncio.CancelledError:
+                pass
             except Exception:
                 pass
                 
         session.is_playing = False
         
-        # Clear Exotel's audio buffer
-        if session.stream_sid:
+        # Clear Exotel's audio buffer only if we were actually playing/interrupted
+        if was_running and session.stream_sid:
             clear_event = {
                 "event": "clear",
                 "stream_sid": session.stream_sid

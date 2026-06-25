@@ -12,9 +12,11 @@ except ImportError:
     anthropic = None
 
 try:
-    import google.generativeai as genai
+    from google import genai
+    from google.genai import types
 except ImportError:
     genai = None
+    types = None
 
 class LLMClient:
     def __init__(self):
@@ -30,11 +32,12 @@ class LLMClient:
                 logger.error(f"Failed to initialize Anthropic client: {e}")
                 
         # Initialize Gemini
+        self.gemini_client = None
         if genai and self.gemini_key and "mock_" not in self.gemini_key:
             try:
-                genai.configure(api_key=self.gemini_key)
+                self.gemini_client = genai.Client(api_key=self.gemini_key)
             except Exception as e:
-                logger.error(f"Failed to configure Gemini: {e}")
+                logger.error(f"Failed to configure Gemini client: {e}")
 
     async def generate_response(
         self, 
@@ -82,37 +85,40 @@ class LLMClient:
                 logger.error(f"Claude Haiku call failed: {e}. Falling back to Gemini...")
         
         # Try Gemini Fallback
-        if genai and self.gemini_key and "mock_" not in self.gemini_key:
+        if self.gemini_client:
             gemini_messages = []
             for msg in messages:
                 if msg["role"] == "system":
                     continue
                 role = "user" if msg["role"] == "customer" else "model"
-                gemini_messages.append({"role": role, "parts": [msg["content"]]})
+                gemini_messages.append({"role": role, "parts": [{"text": msg["content"]}]})
             
             if not gemini_messages:
-                gemini_messages = [{"role": "user", "parts": ["Hello"]}]
+                gemini_messages = [{"role": "user", "parts": [{"text": "Hello"}]}]
             
-            gemini_models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+            gemini_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
             for model_name in gemini_models:
                 try:
                     logger.info(f"Calling Gemini Fallback with model: {model_name}...")
-                    model = genai.GenerativeModel(
-                        model_name=model_name,
-                        system_instruction=system_prompt
-                    )
                     
-                    response = await model.generate_content_async(gemini_messages)
+                    response = await self.gemini_client.aio.models.generate_content(
+                        model=model_name,
+                        contents=gemini_messages,
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_prompt
+                        )
+                    )
                     text = response.text
                     
                     if hasattr(response, "usage_metadata") and response.usage_metadata:
-                        token_usage["prompt_tokens"] = response.usage_metadata.prompt_token_count
-                        token_usage["completion_tokens"] = response.usage_metadata.candidates_token_count
+                        token_usage["prompt_tokens"] = response.usage_metadata.prompt_token_count or 0
+                        token_usage["completion_tokens"] = response.usage_metadata.candidates_token_count or 0
                         
                     logger.info(f"Gemini model {model_name} succeeded. Tokens: {token_usage}")
                     return text, token_usage
                 except Exception as e:
-                    logger.error(f"Gemini model {model_name} call failed: {e}. Trying next model...")
+                    logger.error(f"Gemini model {model_name} call failed: {e}.")
+                    logger.info("Trying next model...")
 
         # Fallback to Mock / Offline Response if both clients are unavailable/failed
         logger.warning("No LLM services succeeded. Returning graceful fallback response.")
@@ -171,40 +177,43 @@ class LLMClient:
                 logger.error(f"Claude Haiku streaming failed: {e}. Falling back to Gemini stream...")
         
         # Try Gemini Fallback
-        if genai and self.gemini_key and "mock_" not in self.gemini_key:
+        if self.gemini_client:
             gemini_messages = []
             for msg in messages:
                 if msg["role"] == "system":
                     continue
                 role = "user" if msg["role"] == "customer" else "model"
-                gemini_messages.append({"role": role, "parts": [msg["content"]]})
+                gemini_messages.append({"role": role, "parts": [{"text": msg["content"]}]})
             
             if not gemini_messages:
-                gemini_messages = [{"role": "user", "parts": ["Hello"]}]
+                gemini_messages = [{"role": "user", "parts": [{"text": "Hello"}]}]
             
-            gemini_models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+            gemini_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
             for model_name in gemini_models:
                 try:
                     logger.info(f"Calling Gemini Stream Fallback with model: {model_name}...")
-                    model = genai.GenerativeModel(
-                        model_name=model_name,
-                        system_instruction=system_prompt
-                    )
                     
-                    response = await model.generate_content_async(gemini_messages, stream=True)
+                    response = await self.gemini_client.aio.models.generate_content_stream(
+                        model=model_name,
+                        contents=gemini_messages,
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_prompt
+                        )
+                    )
                     async for chunk in response:
                         if chunk.text:
                             yield chunk.text, None
                     
                     if hasattr(response, "usage_metadata") and response.usage_metadata:
-                        token_usage["prompt_tokens"] = response.usage_metadata.prompt_token_count
-                        token_usage["completion_tokens"] = response.usage_metadata.candidates_token_count
+                        token_usage["prompt_tokens"] = response.usage_metadata.prompt_token_count or 0
+                        token_usage["completion_tokens"] = response.usage_metadata.candidates_token_count or 0
                     
                     logger.info(f"Gemini model {model_name} Stream finished. Tokens: {token_usage}")
                     yield "", token_usage
                     return
                 except Exception as e:
-                    logger.error(f"Gemini model {model_name} streaming failed: {e}. Trying next model...")
+                    logger.error(f"Gemini model {model_name} streaming failed: {e}.")
+                    logger.info("Trying next model...")
         
         # Fallback to Mock / Offline Streaming Response
         logger.warning("No LLM services succeeded for stream. Returning graceful mock stream.")
