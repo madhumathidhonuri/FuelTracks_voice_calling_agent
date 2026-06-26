@@ -8,7 +8,11 @@ class TestDNSResolver(unittest.IsolatedAsyncioTestCase):
         _resolved_ip_cache.clear()
 
     @patch("httpx.AsyncClient.get")
-    async def test_resolve_doh_cloudflare_success(self, mock_get):
+    @patch("socket.getaddrinfo")
+    async def test_resolve_doh_cloudflare_success(self, mock_getaddrinfo, mock_get):
+        # Mock socket to fail
+        mock_getaddrinfo.side_effect = Exception("socket error")
+        
         # Mock response from Cloudflare DoH (synchronous methods on response)
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -17,12 +21,16 @@ class TestDNSResolver(unittest.IsolatedAsyncioTestCase):
         }
         mock_get.return_value = mock_response
 
-        ip = await resolve_hostname_ipv4("api.sarvam.ai")
+        ip = await resolve_hostname_ipv4("example.com")
         self.assertEqual(ip, "1.2.3.4")
-        self.assertIn("api.sarvam.ai", _resolved_ip_cache)
+        self.assertIn("example.com", _resolved_ip_cache)
 
     @patch("httpx.AsyncClient.get")
-    async def test_resolve_doh_google_fallback(self, mock_get):
+    @patch("socket.getaddrinfo")
+    async def test_resolve_doh_google_fallback(self, mock_getaddrinfo, mock_get):
+        # Mock socket to fail
+        mock_getaddrinfo.side_effect = Exception("socket error")
+        
         # Cloudflare fails, Google succeeds
         mock_response_fail = MagicMock()
         mock_response_fail.status_code = 500
@@ -35,7 +43,7 @@ class TestDNSResolver(unittest.IsolatedAsyncioTestCase):
 
         mock_get.side_effect = [mock_response_fail, mock_response_success]
 
-        ip = await resolve_hostname_ipv4("api.sarvam.ai")
+        ip = await resolve_hostname_ipv4("example.com")
         self.assertEqual(ip, "5.6.7.8")
 
     @patch("httpx.AsyncClient.get")
@@ -51,7 +59,7 @@ class TestDNSResolver(unittest.IsolatedAsyncioTestCase):
             (None, None, None, None, ("9.10.11.12", 80))
         ]
 
-        ip = await resolve_hostname_ipv4("api.sarvam.ai")
+        ip = await resolve_hostname_ipv4("example.com")
         self.assertEqual(ip, "9.10.11.12")
 
     @patch("httpx.AsyncClient.get")

@@ -14,12 +14,12 @@ logger = logging.getLogger(__name__)
 def extract_sentences(text_buffer: str) -> Tuple[List[str], str]:
     """
     Extract complete sentences/clauses from the stream buffer using standard terminators
-    (., ?, !, or native Indic full-stops like । and newlines).
+    (., ?, !, or native Indic full-stops like । and newlines, and commas/clause markers not inside numbers).
     Returns:
         Tuple[List[extracted_sentences], remaining_suffix]
     """
-    # Match text ending with terminators (. ! ? \n or ।)
-    matches = re.findall(r'([^.!?\n।]+[.!?\n।]+)', text_buffer)
+    # Match text ending with [.!?\n।，] or a comma not followed by a digit ,(?!\d)
+    matches = re.findall(r'([^.!?\n।,，]+(?:[.!?\n।，]|,(?!\d))+)', text_buffer)
     if not matches:
         return [], text_buffer
         
@@ -37,11 +37,11 @@ class AudioPipeline:
         # Audio buffer for accumulating customer speech
         self.audio_buffer = bytearray()
         
-        # VAD settings: 800 RMS threshold, 600ms silence timeout for faster responses
+        # VAD settings: 800 RMS threshold, 500ms silence timeout for faster responses
         self.vad = VoiceActivityDetector(
             sample_rate=sample_rate, 
             threshold=800.0, 
-            silence_timeout_ms=600
+            silence_timeout_ms=500
         )
         
         # API Clients

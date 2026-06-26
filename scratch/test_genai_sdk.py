@@ -56,10 +56,12 @@ async def run():
     print("--- Testing google-genai Manual Dict History ---")
     client = genai.Client(api_key=settings.GEMINI_API_KEY)
     
-    # We know gemini-2.5-flash-lite was working and not fully exhausted
-    model = "gemini-2.5-flash-lite"
-    await test_chat_manual_dict(client, model)
-    await test_chat_stream_manual_dict(client, model)
+    models = ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.0-flash", "gemini-2.5-flash-lite"]
+    for model in models:
+        print(f"\nTesting model: {model}")
+        await test_chat_manual_dict(client, model)
+        await test_chat_stream_manual_dict(client, model)
 
 if __name__ == "__main__":
     asyncio.run(run())
+

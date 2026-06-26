@@ -18,10 +18,41 @@ except ImportError:
     genai = None
     types = None
 
+import httpx
+import socket
+from src.audio.dns_resolver import resolve_hostname_ipv4
+
+class IPv4OnlyAsyncTransport(httpx.AsyncHTTPTransport):
+    async def handle_async_request(self, request, *args, **kwargs):
+        hostname = request.url.host
+        if "googleapis.com" in hostname or "google.dev" in hostname:
+            try:
+                resolved_ip = await resolve_hostname_ipv4(hostname)
+                port = request.url.port or (443 if request.url.scheme == "https" else 80)
+                request.extensions["network_address"] = (resolved_ip, port)
+                logger.info(f"[Gemini Transport] Intercepted {hostname}, resolved to {resolved_ip}")
+            except Exception as e:
+                logger.warning(f"[Gemini Transport] Failed to resolve {hostname}: {e}")
+        return await super().handle_async_request(request, *args, **kwargs)
+
+class IPv4OnlySyncTransport(httpx.HTTPTransport):
+    def handle_request(self, request, *args, **kwargs):
+        hostname = request.url.host
+        if "googleapis.com" in hostname or "google.dev" in hostname:
+            try:
+                resolved_ip = socket.gethostbyname(hostname)
+                port = request.url.port or (443 if request.url.scheme == "https" else 80)
+                request.extensions["network_address"] = (resolved_ip, port)
+                logger.info(f"[Gemini Sync Transport] Intercepted {hostname}, resolved to {resolved_ip}")
+            except Exception as e:
+                logger.warning(f"[Gemini Sync Transport] Failed to resolve {hostname}: {e}")
+        return super().handle_request(request, *args, **kwargs)
+
 class LLMClient:
     def __init__(self):
         self.anthropic_key = settings.ANTHROPIC_API_KEY
         self.gemini_key = settings.GEMINI_API_KEY
+        self.model_failures = {}  # Tracks model name -> timestamp of last failure
         
         # Initialize Anthropic
         self.claude_client = None
@@ -35,9 +66,50 @@ class LLMClient:
         self.gemini_client = None
         if genai and self.gemini_key and "mock_" not in self.gemini_key:
             try:
-                self.gemini_client = genai.Client(api_key=self.gemini_key)
+                http_options = types.HttpOptions(
+                    client_args={
+                        "transport": IPv4OnlySyncTransport(),
+                    },
+                    async_client_args={
+                        "transport": IPv4OnlyAsyncTransport(),
+                    }
+                )
+                self.gemini_client = genai.Client(
+                    api_key=self.gemini_key,
+                    http_options=http_options
+                )
             except Exception as e:
                 logger.error(f"Failed to configure Gemini client: {e}")
+
+    def get_healthy_models(self) -> list:
+        """
+        Returns the list of Gemini models, deprioritizing those that have failed recently.
+        """
+        import time
+        cooldown = 300  # 5 minutes cooldown
+        now = time.time()
+        
+        base_models = [
+            "gemini-3.5-flash",
+            "gemini-flash-lite-latest",
+            "gemini-flash-latest",
+            "gemini-3.1-flash-lite",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.0-flash"
+        ]
+        
+        healthy = []
+        unhealthy = []
+        
+        for model in base_models:
+            last_fail = self.model_failures.get(model, 0)
+            if now - last_fail > cooldown:
+                healthy.append(model)
+            else:
+                unhealthy.append(model)
+                
+        return healthy + unhealthy
 
     async def generate_response(
         self, 
@@ -96,7 +168,7 @@ class LLMClient:
             if not gemini_messages:
                 gemini_messages = [{"role": "user", "parts": [{"text": "Hello"}]}]
             
-            gemini_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
+            gemini_models = self.get_healthy_models()
             for model_name in gemini_models:
                 try:
                     logger.info(f"Calling Gemini Fallback with model: {model_name}...")
@@ -118,6 +190,8 @@ class LLMClient:
                     return text, token_usage
                 except Exception as e:
                     logger.error(f"Gemini model {model_name} call failed: {e}.")
+                    import time
+                    self.model_failures[model_name] = time.time()
                     logger.info("Trying next model...")
 
         # Fallback to Mock / Offline Response if both clients are unavailable/failed
@@ -188,7 +262,7 @@ class LLMClient:
             if not gemini_messages:
                 gemini_messages = [{"role": "user", "parts": [{"text": "Hello"}]}]
             
-            gemini_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
+            gemini_models = self.get_healthy_models()
             for model_name in gemini_models:
                 try:
                     logger.info(f"Calling Gemini Stream Fallback with model: {model_name}...")
@@ -200,7 +274,18 @@ class LLMClient:
                             system_instruction=system_prompt
                         )
                     )
-                    async for chunk in response:
+                    
+                    response_iter = response.__aiter__()
+                    try:
+                        # Wait at most 2.5 seconds for the first stream chunk to arrive
+                        first_chunk = await asyncio.wait_for(response_iter.__anext__(), timeout=2.5)
+                        if first_chunk.text:
+                            yield first_chunk.text, None
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Gemini model {model_name} first chunk timeout (2.5s). Falling back...")
+                        raise RuntimeError(f"First chunk timeout on model {model_name}")
+                        
+                    async for chunk in response_iter:
                         if chunk.text:
                             yield chunk.text, None
                     
@@ -213,6 +298,8 @@ class LLMClient:
                     return
                 except Exception as e:
                     logger.error(f"Gemini model {model_name} streaming failed: {e}.")
+                    import time
+                    self.model_failures[model_name] = time.time()
                     logger.info("Trying next model...")
         
         # Fallback to Mock / Offline Streaming Response

@@ -14,3 +14,6 @@ __pycache__/
 # Excel files (ignores all customer sheets except the format template)
 *.xlsx
 !customers_sample.xlsx
+
+# Log files
+*.log
