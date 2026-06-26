@@ -67,8 +67,7 @@ jobs:
       # Use the test Postgres instance for integration tests
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/fueltracks_test
       # Stub out external API keys so tests never make real network calls
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY || 'test-key' }}
-      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY || 'test-key' }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY || 'test-key' }}
       SARVAM_API_KEY: ${{ secrets.SARVAM_API_KEY || 'test-key' }}
       EXOTEL_API_KEY: ${{ secrets.EXOTEL_API_KEY || 'test-key' }}
       EXOTEL_API_TOKEN: ${{ secrets.EXOTEL_API_TOKEN || 'test-token' }}

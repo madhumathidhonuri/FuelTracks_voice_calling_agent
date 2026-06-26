@@ -2,8 +2,8 @@
 Prompt Builder
 ---------------
 Builds the final system prompt from language profile, company instructions,
-and optional style-template files. Returns a SystemPrompt dataclass so both
-Claude and Gemini clients share one object — no risk of divergence.
+and optional style-template files. Returns a SystemPrompt dataclass so the
+Groq LLM client has one consistent object — no risk of divergence.
 """
 import logging
 from dataclasses import dataclass
@@ -79,7 +79,7 @@ def build_system_prompt(
     company instructions.
 
     Returns:
-        SystemPrompt — consumed by both Claude and Gemini clients via `.text`.
+        SystemPrompt — consumed by the Groq LLM client via `.text`.
     """
     base_prompt_path = settings.PROMPTS_DIR / "base_system_prompt.txt"
     base_template = load_prompt_file(base_prompt_path)
@@ -125,16 +125,27 @@ def build_system_prompt(
     if style_notes:
         full_instructions += f"\n\n[STYLE GUIDELINE]\n{style_notes}"
 
-    # 4. Strict language enforcement directive
+    # 4. Code-mixing language directive (Tenglish / Hinglish style)
     if primary_lang_name != "English":
+        script_map = {"Telugu": "Telugu script (లిపి)", "Hindi": "Devanagari script (देवनागरी)"}
+        script_note = script_map.get(primary_lang_name, f"{primary_lang_name} script")
         strict_directive = (
-            f"\n\n[MANDATORY LANGUAGE RULE]\n"
-            f"You MUST write your entire response in {primary_lang_name} (using {primary_lang_name} script). "
-            f"Do NOT output English sentences or English replies (such as 'Okay, Telugu it is' or "
-            f"'Great, thank you for letting me know' in English). "
-            f"Switch immediately and completely to {primary_lang_name} script right now."
+            f"\n\n[LANGUAGE STYLE RULE]\n"
+            f"Speak in natural, everyday {primary_lang_name} the way people actually talk on phone calls "
+            f"in India — NOT pure literary or textbook {primary_lang_name}.\n"
+            f"- Mix in common English words naturally: product names, technical terms (GPS, tracker, "
+            f"demo, software, delivery, account, WhatsApp, rupees, percent, etc.) should stay in English.\n"
+            f"- Use {script_note} for {primary_lang_name} words, but do NOT force English sentences "
+            f"into {primary_lang_name} script.\n"
+            f"- Do NOT reply entirely in English unless the customer switches to English first.\n"
+            f"- Do NOT open with English phrases like 'Okay, Telugu it is!' — just speak naturally.\n"
+            f"- Aim for roughly 60-70% {primary_lang_name} words, 30-40% English words woven in naturally.\n"
+            f"- Example good style (Telugu): 'మీ vehicle కి GPS tracker install చేసుకుంటే real-time tracking "
+            f"చేయవచ్చు, demo చూడాలంటే చెప్పండి.'\n"
+            f"- Example bad style (too pure): 'మీ వాహనమునకు స్థాన నిర్ధారణ పరికరమును అమర్చుకొనుము.'"
         )
         full_instructions += strict_directive
+
 
     # 5. Interpolate template
     try:

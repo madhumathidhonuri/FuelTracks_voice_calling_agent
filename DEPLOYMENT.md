@@ -34,7 +34,7 @@ Exotel ──WebSocket──► nginx (TLS termination)
                    FastAPI app (uvicorn)
                     ├─ VAD (energy/webrtc/silero)
                     ├─ Sarvam STT
-                    ├─ Claude / Gemini LLM
+                    ├─ Groq LLM (Llama 3)
                     └─ Sarvam TTS
                            │
                      PostgreSQL (asyncpg)
@@ -59,8 +59,7 @@ Nginx terminates TLS and proxies to the FastAPI app running inside Docker.
 | SSL certificate | Let's Encrypt | Let's Encrypt |
 
 API keys required:
-- Anthropic Claude (`ANTHROPIC_API_KEY`)
-- Google Gemini (`GOOGLE_API_KEY`)
+- Groq API (`GROQ_API_KEY`) — free at https://console.groq.com/keys
 - Sarvam AI (`SARVAM_API_KEY`)
 - Exotel (`EXOTEL_API_KEY`, `EXOTEL_API_TOKEN`, `EXOTEL_ACCOUNT_SID`)
 
@@ -179,8 +178,7 @@ SECRET_KEY=<generate: openssl rand -hex 32>
 DATABASE_URL=postgresql://fueltracks:STRONG_PASSWORD@db:5432/fueltracks_prod
 
 # ── AI APIs ──────────────────────────────────────────────────────────────────
-ANTHROPIC_API_KEY=sk-ant-...
-GOOGLE_API_KEY=AIza...
+GROQ_API_KEY=gsk_...
 SARVAM_API_KEY=...
 
 # ── Exotel ───────────────────────────────────────────────────────────────────

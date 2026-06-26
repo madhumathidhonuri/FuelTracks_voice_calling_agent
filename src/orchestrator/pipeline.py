@@ -12,6 +12,28 @@ from src.storage.database import add_transcript_turn, aadd_transcript_turn
 
 logger = logging.getLogger(__name__)
 
+EMAIL_PATTERN = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+URL_PATTERN = re.compile(r'https?://[^\s]+')
+DECIMAL_PATTERN = re.compile(r'\b\d+\.\d+\b')
+ABBREV_PATTERN = re.compile(r'\b(?:e\.g\.|i\.e\.|etc\.)', re.IGNORECASE)
+PHONE_PATTERN = re.compile(r'\+\d{1,4}[\s-]\d{3,10}(?:[\s-]\d{3,10})*')
+
+def protect_special_tokens(text: str) -> str:
+    # Protect Emails (replace dots with a safe token that has NO sentence-terminator chars)
+    text = EMAIL_PATTERN.sub(lambda m: m.group().replace('.', '__DOT__'), text)
+    # Protect URLs
+    text = URL_PATTERN.sub(lambda m: m.group().replace('.', '__DOT__'), text)
+    # Protect Decimals
+    text = DECIMAL_PATTERN.sub(lambda m: m.group().replace('.', '__DOT__'), text)
+    # Protect Abbreviations
+    text = ABBREV_PATTERN.sub(lambda m: m.group().replace('.', '__DOT__'), text)
+    # Protect Phone numbers (prevent space/dash split issues)
+    text = PHONE_PATTERN.sub(lambda m: m.group().replace(' ', '__SPACE__').replace('-', '__DASH__'), text)
+    return text
+
+def restore_special_tokens(text: str) -> str:
+    return text.replace('__DOT__', '.').replace('__SPACE__', ' ').replace('__DASH__', '-')
+
 def extract_sentences(text_buffer: str) -> Tuple[List[str], str]:
     """
     Extract complete sentences/clauses from the stream buffer using standard terminators
@@ -19,14 +41,22 @@ def extract_sentences(text_buffer: str) -> Tuple[List[str], str]:
     Returns:
         Tuple[List[extracted_sentences], remaining_suffix]
     """
+    protected_text = protect_special_tokens(text_buffer)
     # Match text ending with [.!?\n।，] or a comma not followed by a digit ,(?!\d)
-    matches = re.findall(r'([^.!?\n।,，]+(?:[.!?\n।，]|,(?!\d))+)', text_buffer)
+    matches = re.findall(r'([^.!?\n।,，]+(?:[.!?\n।，]|,(?!\d))+)', protected_text)
     if not matches:
         return [], text_buffer
         
     total_matched_len = sum(len(m) for m in matches)
-    remaining = text_buffer[total_matched_len:]
-    sentences = [m.strip() for m in matches if m.strip()]
+    remaining_protected = protected_text[total_matched_len:]
+    remaining = restore_special_tokens(remaining_protected)
+    
+    sentences = []
+    for m in matches:
+        stripped = m.strip()
+        if stripped:
+            sentences.append(restore_special_tokens(stripped))
+            
     return sentences, remaining
 
 class AudioPipeline:
@@ -326,10 +356,11 @@ class AudioPipeline:
                 company_specific_instructions=system_prompt
             )
             
-            # Check if call duration is approaching the 1-2 minute limit
+            # Check if call duration is approaching the limit (75 seconds for marketing, 145 seconds for others)
             from datetime import datetime
             elapsed_sec = (datetime.now() - self.session.start_time).total_seconds()
-            if elapsed_sec > 75.0:
+            soft_limit = 75.0 if self.session.call_type == "marketing" else 145.0
+            if elapsed_sec > soft_limit:
                 logger.info(f"Soft limit reached ({elapsed_sec:.1f}s). Appending wrap-up instructions to prompt.")
                 system_prompt += (
                     "\n\n[CRITICAL DIRECTIVE: The call is reaching its duration limit. "

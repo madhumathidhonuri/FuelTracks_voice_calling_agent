@@ -129,7 +129,7 @@ async def run_simulation():
         call_type = "inbound_routing"
         
     print(f"\nStarting call session Call SID: {call_sid}...")
-    session = call_manager.create_session(
+    session = await call_manager.create_session(
         call_sid=call_sid,
         from_number=from_num,
         to_number=to_num,
@@ -259,7 +259,7 @@ async def run_simulation():
             
     # Close pipeline and session
     pipeline.close()
-    call_manager.close_session(stream_sid, outcome="completed")
+    await call_manager.close_session(stream_sid, outcome="completed")
     print("\n" + "=" * 60)
     print("                      CALL TERMINATED")
     print("=" * 60)

@@ -115,13 +115,13 @@ class TestCallSimulation(unittest.TestCase):
     def test_silero_based_vad(self):
         # Initialize VAD with a threshold for Silero (e.g. 0.5)
         vad = VoiceActivityDetector(sample_rate=16000, threshold=0.5, silence_timeout_ms=500)
-        self.assertTrue(vad._use_silero)
+        self.assertEqual(vad._backend, "silero")
         
         # Mock the Silero ONNX model call
         from unittest.mock import MagicMock
-        original_model = VoiceActivityDetector._model
+        original_model = VoiceActivityDetector._silero_model
         mock_model = MagicMock()
-        VoiceActivityDetector._model = mock_model
+        VoiceActivityDetector._silero_model = mock_model
         
         try:
             # Silence (confidence 0.01 < threshold 0.5)
@@ -155,7 +155,7 @@ class TestCallSimulation(unittest.TestCase):
             self.assertTrue(stopped)
         finally:
             # Restore
-            VoiceActivityDetector._model = original_model
+            VoiceActivityDetector._silero_model = original_model
 
     def test_language_profiling(self):
         profile = LanguageProfile()

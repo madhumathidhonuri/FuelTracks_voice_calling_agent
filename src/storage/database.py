@@ -151,6 +151,34 @@ async def ainit_db():
                 FOREIGN KEY (call_sid) REFERENCES calls (call_sid)
             )
             """)
+            
+            # Auto-migrate: check and add missing columns to existing tables
+            columns = [row['column_name'] for row in await conn.fetch(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'calls'"
+            )]
+            if columns:
+                if "cost_tokens" not in columns:
+                    await conn.execute("ALTER TABLE calls ADD COLUMN cost_tokens INT DEFAULT 0")
+                if "cost_stt_sec" not in columns:
+                    await conn.execute("ALTER TABLE calls ADD COLUMN cost_stt_sec DOUBLE PRECISION DEFAULT 0.0")
+                if "cost_tts_char" not in columns:
+                    await conn.execute("ALTER TABLE calls ADD COLUMN cost_tts_char INT DEFAULT 0")
+                if "stt_latency_ms" not in columns:
+                    await conn.execute("ALTER TABLE calls ADD COLUMN stt_latency_ms DOUBLE PRECISION DEFAULT 0.0")
+                if "llm_latency_ms" not in columns:
+                    await conn.execute("ALTER TABLE calls ADD COLUMN llm_latency_ms DOUBLE PRECISION DEFAULT 0.0")
+                if "tts_latency_ms" not in columns:
+                    await conn.execute("ALTER TABLE calls ADD COLUMN tts_latency_ms DOUBLE PRECISION DEFAULT 0.0")
+            
+            t_columns = [row['column_name'] for row in await conn.fetch(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'transcripts'"
+            )]
+            if t_columns:
+                if "detected_language" not in t_columns:
+                    await conn.execute("ALTER TABLE transcripts ADD COLUMN detected_language VARCHAR(100)")
+                if "language_confidence" not in t_columns:
+                    await conn.execute("ALTER TABLE transcripts ADD COLUMN language_confidence DOUBLE PRECISION")
+                    
         logger.info("PostgreSQL database schema initialized successfully.")
     else:
         async with aiosqlite.connect(get_db_path()) as db:
@@ -187,6 +215,33 @@ async def ainit_db():
             )
             """)
             await db.commit()
+            
+            # Auto-migrate: check and add missing columns to existing tables
+            async with db.execute("PRAGMA table_info(calls)") as cursor:
+                columns = [row[1] for row in await cursor.fetchall()]
+            if columns:
+                if "cost_tokens" not in columns:
+                    await db.execute("ALTER TABLE calls ADD COLUMN cost_tokens INTEGER DEFAULT 0")
+                if "cost_stt_sec" not in columns:
+                    await db.execute("ALTER TABLE calls ADD COLUMN cost_stt_sec REAL DEFAULT 0.0")
+                if "cost_tts_char" not in columns:
+                    await db.execute("ALTER TABLE calls ADD COLUMN cost_tts_char INTEGER DEFAULT 0")
+                if "stt_latency_ms" not in columns:
+                    await db.execute("ALTER TABLE calls ADD COLUMN stt_latency_ms REAL DEFAULT 0.0")
+                if "llm_latency_ms" not in columns:
+                    await db.execute("ALTER TABLE calls ADD COLUMN llm_latency_ms REAL DEFAULT 0.0")
+                if "tts_latency_ms" not in columns:
+                    await db.execute("ALTER TABLE calls ADD COLUMN tts_latency_ms REAL DEFAULT 0.0")
+            
+            async with db.execute("PRAGMA table_info(transcripts)") as cursor:
+                t_columns = [row[1] for row in await cursor.fetchall()]
+            if t_columns:
+                if "detected_language" not in t_columns:
+                    await db.execute("ALTER TABLE transcripts ADD COLUMN detected_language TEXT")
+                if "language_confidence" not in t_columns:
+                    await db.execute("ALTER TABLE transcripts ADD COLUMN language_confidence REAL")
+            await db.commit()
+            
         logger.info("SQLite database schema initialized in WAL mode.")
 
 

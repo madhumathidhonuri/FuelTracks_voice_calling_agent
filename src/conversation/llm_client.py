@@ -1,106 +1,36 @@
+# LLM CASCADE ORDER (Gemini-primary, Groq-fallback):
+# 1. gemini-2.0-flash          (primary — fastest Gemini, if key is set & quota OK)
+# 2. llama-3.3-70b-versatile   (Groq fallback #1 — high quality)
+# 3. llama-3.1-8b-instant      (Groq fallback #2 — ultra-fast)
+# If all fail → graceful apology response
+
 """
 LLM Client
 -----------
-Generates conversational responses using Claude Haiku (primary)
-with a Gemini Flash cascade fallback.
+Generates conversational responses using a two-tier cascade:
+  Primary  : Google Gemini (gemini-2.0-flash) via REST API
+  Fallback : Groq API (Llama 3 models) via OpenAI-compatible endpoint
 
-Changes in this version:
-  - Fix 2: Anthropic API calls are wrapped with tenacity exponential-backoff retry.
-  - Fix 3: Accepts SystemPrompt dataclass (or plain str) — both clients consume .text,
-            guaranteeing identical prompts across Claude and Gemini.
-  - Bug fix: Gemini streaming usage_metadata is now read from the final aggregated
-             response object (not the streaming iterator, which never carries it).
+If GEMINI_API_KEY is set and working, Gemini is used first.
+If Gemini fails (quota, network, etc.), the client transparently falls through
+to the Groq models in order, with no interruption to the call.
+
+If GEMINI_API_KEY is not set, the cascade starts directly from Groq.
 """
 import logging
 import asyncio
+import time
+import json
 from typing import Tuple, Dict, Any, Union
 from config.settings import settings
 from src.conversation.prompt_builder import SystemPrompt
 
 logger = logging.getLogger(__name__)
 
-# Initialize client imports inside try-blocks to avoid startup failure if keys are absent
 try:
-    import anthropic
+    import httpx
 except ImportError:
-    anthropic = None
-
-try:
-    from google import genai
-    from google.genai import types
-except ImportError:
-    genai = None
-    types = None
-
-import httpx
-import socket
-from src.audio.dns_resolver import resolve_hostname_ipv4
-
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-    before_sleep_log,
-)
-
-# ---------------------------------------------------------------------------
-# Retry policy for Anthropic calls
-# ---------------------------------------------------------------------------
-
-_ANTHROPIC_RETRYABLE = (Exception,)  # anthropic raises APIConnectionError, APIStatusError etc.
-
-def _is_anthropic_retryable(exc: BaseException) -> bool:
-    """Only retry transient errors — not 4xx auth/validation errors."""
-    if anthropic is None:
-        return False
-    not_retryable = (
-        anthropic.AuthenticationError,
-        anthropic.PermissionDeniedError,
-        anthropic.NotFoundError,
-        anthropic.UnprocessableEntityError,
-    )
-    return not isinstance(exc, not_retryable)
-
-from tenacity import retry_if_exception
-
-_anthropic_retry = retry(
-    retry=retry_if_exception(_is_anthropic_retryable),
-    wait=wait_exponential(multiplier=0.5, min=0.5, max=8),
-    stop=stop_after_attempt(3),
-    before_sleep=before_sleep_log(logger, logging.WARNING),
-    reraise=True,
-)
-
-# ---------------------------------------------------------------------------
-# IPv4-only transports (unchanged)
-# ---------------------------------------------------------------------------
-
-class IPv4OnlyAsyncTransport(httpx.AsyncHTTPTransport):
-    async def handle_async_request(self, request, *args, **kwargs):
-        hostname = request.url.host
-        if "googleapis.com" in hostname or "google.dev" in hostname:
-            try:
-                resolved_ip = await resolve_hostname_ipv4(hostname)
-                port = request.url.port or (443 if request.url.scheme == "https" else 80)
-                request.extensions["network_address"] = (resolved_ip, port)
-                logger.info(f"[Gemini Transport] Intercepted {hostname}, resolved to {resolved_ip}")
-            except Exception as e:
-                logger.warning(f"[Gemini Transport] Failed to resolve {hostname}: {e}")
-        return await super().handle_async_request(request, *args, **kwargs)
-
-class IPv4OnlySyncTransport(httpx.HTTPTransport):
-    def handle_request(self, request, *args, **kwargs):
-        hostname = request.url.host
-        if "googleapis.com" in hostname or "google.dev" in hostname:
-            try:
-                resolved_ip = socket.gethostbyname(hostname)
-                port = request.url.port or (443 if request.url.scheme == "https" else 80)
-                request.extensions["network_address"] = (resolved_ip, port)
-                logger.info(f"[Gemini Sync Transport] Intercepted {hostname}, resolved to {resolved_ip}")
-            except Exception as e:
-                logger.warning(f"[Gemini Sync Transport] Failed to resolve {hostname}: {e}")
-        return super().handle_request(request, *args, **kwargs)
+    httpx = None
 
 
 # ---------------------------------------------------------------------------
@@ -115,72 +45,145 @@ def _prompt_text(prompt: Union[str, SystemPrompt]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# API endpoints
+# ---------------------------------------------------------------------------
+
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+GEMINI_STREAM_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent"
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+# Models tried in order (each is a (provider, model_name) tuple)
+# The list is rebuilt at runtime so failed models are deprioritized.
+GEMINI_MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite"]
+GROQ_MODELS   = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+
+
+# ---------------------------------------------------------------------------
 # LLM Client
 # ---------------------------------------------------------------------------
 
 class LLMClient:
     def __init__(self):
-        self.anthropic_key = settings.ANTHROPIC_API_KEY
         self.gemini_key = settings.GEMINI_API_KEY
-        self.model_failures = {}  # Tracks model name -> timestamp of last failure
+        self.groq_key   = settings.GROQ_API_KEY
+        self.model_failures: Dict[str, float] = {}   # model_name -> last-failure timestamp
 
-        # Initialize Anthropic
-        self.claude_client = None
-        if anthropic and self.anthropic_key and "mock_" not in self.anthropic_key:
-            try:
-                self.claude_client = anthropic.AsyncAnthropic(api_key=self.anthropic_key)
-            except Exception as e:
-                logger.error(f"Failed to initialize Anthropic client: {e}")
+        # Log what's configured
+        has_gemini = bool(self.gemini_key and "mock_" not in str(self.gemini_key) and "your_" not in str(self.gemini_key))
+        has_groq   = bool(self.groq_key   and "mock_" not in str(self.groq_key)   and "your_" not in str(self.groq_key))
 
-        # Initialize Gemini
-        self.gemini_client = None
-        if genai and self.gemini_key and "mock_" not in self.gemini_key:
-            try:
-                http_options = types.HttpOptions(
-                    client_args={
-                        "transport": IPv4OnlySyncTransport(),
-                    },
-                    async_client_args={
-                        "transport": IPv4OnlyAsyncTransport(),
-                    }
-                )
-                self.gemini_client = genai.Client(
-                    api_key=self.gemini_key,
-                    http_options=http_options
-                )
-            except Exception as e:
-                logger.error(f"Failed to configure Gemini client: {e}")
+        if has_gemini and has_groq:
+            logger.info("LLM cascade: Gemini (primary) → Groq (fallback).")
+        elif has_gemini:
+            logger.info("LLM cascade: Gemini only (GROQ_API_KEY not set).")
+        elif has_groq:
+            logger.info("LLM cascade: Groq only (GEMINI_API_KEY not set or quota exhausted).")
+        else:
+            logger.warning("No LLM keys configured — all calls will return the offline fallback.")
+
+    # -----------------------------------------------------------------------
+    # Build ordered model list (healthy models first)
+    # -----------------------------------------------------------------------
 
     def get_healthy_models(self) -> list:
-        """Returns the list of Gemini models, deprioritizing those that have failed recently."""
-        import time
-        cooldown = 300  # 5 minutes cooldown
+        """
+        Returns (provider, model_name) pairs in cascade order, with recently-failed
+        models moved to the back after a 5-minute cooldown.
+        """
+        cooldown = 300  # seconds
         now = time.time()
 
-        base_models = [
-            "gemini-3.5-flash",
-            "gemini-flash-lite-latest",
-            "gemini-flash-latest",
-            "gemini-3.1-flash-lite",
-            "gemini-2.5-flash",
-            "gemini-2.5-flash-lite",
-            "gemini-2.0-flash"
-        ]
+        has_gemini = bool(self.gemini_key and "mock_" not in str(self.gemini_key) and "your_" not in str(self.gemini_key))
+        has_groq   = bool(self.groq_key   and "mock_" not in str(self.groq_key)   and "your_" not in str(self.groq_key))
 
-        healthy = []
-        unhealthy = []
+        candidates = []
+        if has_gemini:
+            candidates += [("gemini", m) for m in GEMINI_MODELS]
+        if has_groq:
+            candidates += [("groq", m) for m in GROQ_MODELS]
 
-        for model in base_models:
-            last_fail = self.model_failures.get(model, 0)
-            if now - last_fail > cooldown:
-                healthy.append(model)
-            else:
-                unhealthy.append(model)
-
+        healthy   = [(p, m) for p, m in candidates if now - self.model_failures.get(m, 0) > cooldown]
+        unhealthy = [(p, m) for p, m in candidates if now - self.model_failures.get(m, 0) <= cooldown]
         return healthy + unhealthy
 
     # -----------------------------------------------------------------------
-    # Non-streaming response
+    # Message format converters
+    # -----------------------------------------------------------------------
+
+    def _to_groq_messages(self, system_text: str, messages: list) -> list:
+        """Convert dialog history to OpenAI/Groq chat format."""
+        out = [{"role": "system", "content": system_text}]
+        for msg in messages:
+            role = msg.get("role", "user")
+            if role == "customer":
+                role = "user"
+            elif role in ("agent", "assistant"):
+                role = "assistant"
+            elif role == "system":
+                continue
+            out.append({"role": role, "content": msg.get("content", "")})
+        return out
+
+    def _to_gemini_body(self, system_text: str, messages: list) -> dict:
+        """Convert dialog history to Gemini generateContent format."""
+        contents = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            if role in ("customer", "user"):
+                g_role = "user"
+            elif role in ("agent", "assistant"):
+                g_role = "model"
+            else:
+                continue
+            contents.append({"role": g_role, "parts": [{"text": msg.get("content", "")}]})
+
+        # Gemini requires the conversation to start with a user turn
+        if not contents or contents[0]["role"] != "user":
+            contents.insert(0, {"role": "user", "parts": [{"text": "Hello"}]})
+
+        return {
+            "system_instruction": {"parts": [{"text": system_text}]},
+            "contents": contents,
+            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1000},
+        }
+
+    # -----------------------------------------------------------------------
+    # Per-provider call helpers (non-streaming)
+    # -----------------------------------------------------------------------
+
+    async def _call_gemini(self, client: "httpx.AsyncClient", model: str, body: dict) -> Tuple[str, dict]:
+        url = GEMINI_API_URL.format(model=model) + f"?key={self.gemini_key}"
+        response = await client.post(url, json=body, timeout=10.0)
+        if response.status_code == 200:
+            data = response.json()
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+            usage = data.get("usageMetadata", {})
+            return text, {
+                "prompt_tokens": usage.get("promptTokenCount", 0),
+                "completion_tokens": usage.get("candidatesTokenCount", 0),
+            }
+        raise RuntimeError(f"Gemini HTTP {response.status_code}: {response.text[:200]}")
+
+    async def _call_groq(self, client: "httpx.AsyncClient", model: str, messages: list) -> Tuple[str, dict]:
+        headers = {"Authorization": f"Bearer {self.groq_key}", "Content-Type": "application/json"}
+        response = await client.post(
+            GROQ_API_URL,
+            headers=headers,
+            json={"model": model, "messages": messages, "temperature": 0.7, "max_tokens": 1000},
+            timeout=10.0,
+        )
+        if response.status_code == 200:
+            data = response.json()
+            text = data["choices"][0]["message"]["content"]
+            usage = data.get("usage", {})
+            return text, {
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+            }
+        raise RuntimeError(f"Groq HTTP {response.status_code}: {response.text[:200]}")
+
+    # -----------------------------------------------------------------------
+    # Non-streaming public API
     # -----------------------------------------------------------------------
 
     async def generate_response(
@@ -189,98 +192,49 @@ class LLMClient:
         messages: list,
     ) -> Tuple[str, Dict[str, int]]:
         """
-        Generate a response using Claude Haiku (primary) or Gemini Flash (fallback).
-        Accepts str or SystemPrompt — both clients receive identical text.
-        Returns:
-            Tuple[response_text, token_usage_dict]
+        Generate a response using Gemini (primary) → Groq (fallback).
+        Returns: (response_text, token_usage_dict)
         """
         system_text = _prompt_text(system_prompt)
         token_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+        ordered = self.get_healthy_models()
 
-        # Format history for Anthropic (role: 'user' | 'assistant')
-        claude_messages = []
-        for msg in messages:
-            if msg["role"] == "system":
-                continue
-            role = "user" if msg["role"] == "customer" else "assistant"
-            claude_messages.append({"role": role, "content": msg["content"]})
+        if not ordered:
+            logger.warning("No LLM API keys configured — returning offline fallback.")
+            return self._fallback_text(), token_usage
 
-        if not claude_messages:
-            claude_messages = [{"role": "user", "content": "Hello"}]
+        gemini_body  = self._to_gemini_body(system_text, messages)
+        groq_messages = self._to_groq_messages(system_text, messages)
+        start = time.monotonic()
 
-        # --- Try Anthropic first ---
-        if self.claude_client:
-            try:
-                text, token_usage = await self._claude_generate(system_text, claude_messages)
-                return text, token_usage
-            except Exception as e:
-                logger.error(f"Claude Haiku call failed: {e}. Falling back to Gemini...")
-
-        # --- Gemini Fallback ---
-        if self.gemini_client:
-            gemini_messages = []
-            for msg in messages:
-                if msg["role"] == "system":
-                    continue
-                role = "user" if msg["role"] == "customer" else "model"
-                gemini_messages.append({"role": role, "parts": [{"text": msg["content"]}]})
-
-            if not gemini_messages:
-                gemini_messages = [{"role": "user", "parts": [{"text": "Hello"}]}]
-
-            for model_name in self.get_healthy_models():
+        async with httpx.AsyncClient() as client:
+            for provider, model_name in ordered:
+                if time.monotonic() - start > 14.0:
+                    logger.warning("LLM total timeout (14s) reached.")
+                    break
                 try:
-                    logger.info(f"Calling Gemini Fallback with model: {model_name}...")
-                    response = await self.gemini_client.aio.models.generate_content(
-                        model=model_name,
-                        contents=gemini_messages,
-                        config=types.GenerateContentConfig(
-                            system_instruction=system_text  # ← same text as Claude
+                    logger.info(f"Calling {provider.upper()} model: {model_name} ...")
+                    if provider == "gemini":
+                        text, usage = await asyncio.wait_for(
+                            self._call_gemini(client, model_name, gemini_body), timeout=9.0
                         )
-                    )
-                    text = response.text
-                    if hasattr(response, "usage_metadata") and response.usage_metadata:
-                        token_usage["prompt_tokens"] = response.usage_metadata.prompt_token_count or 0
-                        token_usage["completion_tokens"] = response.usage_metadata.candidates_token_count or 0
-                    logger.info(f"Gemini model {model_name} succeeded. Tokens: {token_usage}")
+                    else:
+                        text, usage = await asyncio.wait_for(
+                            self._call_groq(client, model_name, groq_messages), timeout=9.0
+                        )
+                    token_usage.update(usage)
+                    logger.info(f"[{provider.upper()}] {model_name} succeeded. Tokens: {token_usage}")
                     return text, token_usage
+
                 except Exception as e:
-                    logger.error(f"Gemini model {model_name} call failed: {e}.")
-                    import time
+                    logger.error(f"[{provider.upper()}] {model_name} failed: {e}. Trying next...")
                     self.model_failures[model_name] = time.time()
-                    logger.info("Trying next model...")
 
-        # --- Graceful offline fallback ---
-        logger.warning("No LLM services succeeded. Returning graceful fallback response.")
-        fallback_text = (
-            "I'm sorry, I'm experiencing a minor connection issue right now. "
-            "Please call us back at +91 9000666914 or send an email to info@fueltracks.in, "
-            "and we'll help you immediately. Thank you for your patience."
-        )
-        return fallback_text, token_usage
-
-    @_anthropic_retry
-    async def _claude_generate(
-        self, system_text: str, claude_messages: list
-    ) -> Tuple[str, Dict[str, int]]:
-        """Isolated Anthropic non-streaming call — wrapped with tenacity retry."""
-        logger.info("Calling Claude Haiku...")
-        response = await self.claude_client.messages.create(
-            model="claude-3-haiku-20240307",
-            max_tokens=150,
-            system=system_text,
-            messages=claude_messages,
-        )
-        text = response.content[0].text
-        token_usage = {
-            "prompt_tokens": response.usage.input_tokens,
-            "completion_tokens": response.usage.output_tokens,
-        }
-        logger.info(f"Claude Haiku succeeded. Tokens: {token_usage}")
-        return text, token_usage
+        logger.warning("All LLM providers failed — returning offline fallback.")
+        return self._fallback_text(), token_usage
 
     # -----------------------------------------------------------------------
-    # Streaming response
+    # Streaming public API
     # -----------------------------------------------------------------------
 
     async def generate_response_stream(
@@ -289,121 +243,121 @@ class LLMClient:
         messages: list,
     ):
         """
-        Generate a streaming response using Claude Haiku (primary) or Gemini Flash (fallback).
-        Yields:
-            Tuple[text_chunk_str, Optional[token_usage_dict]]
+        Streaming response using Gemini (primary) → Groq (fallback).
+        Yields: (text_chunk, Optional[token_usage_dict])
         """
-        system_text = _prompt_text(system_prompt)
-        token_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+        system_text  = _prompt_text(system_prompt)
+        token_usage  = {"prompt_tokens": 0, "completion_tokens": 0}
+        ordered      = self.get_healthy_models()
 
-        # Format history for Anthropic
-        claude_messages = []
-        for msg in messages:
-            if msg["role"] == "system":
-                continue
-            role = "user" if msg["role"] == "customer" else "assistant"
-            claude_messages.append({"role": role, "content": msg["content"]})
+        if not ordered:
+            logger.warning("No LLM API keys configured — returning offline fallback stream.")
+            async for chunk in self._fallback_stream(token_usage):
+                yield chunk
+            return
 
-        if not claude_messages:
-            claude_messages = [{"role": "user", "content": "Hello"}]
+        gemini_body   = self._to_gemini_body(system_text, messages)
+        groq_messages = self._to_groq_messages(system_text, messages)
+        start = time.monotonic()
 
-        # --- Try Anthropic stream first ---
-        if self.claude_client:
+        for provider, model_name in ordered:
+            if time.monotonic() - start > 14.0:
+                logger.warning("LLM total timeout (14s) reached.")
+                break
             try:
-                async for chunk, usage in self._claude_stream(system_text, claude_messages):
-                    yield chunk, usage
-                return
-            except Exception as e:
-                logger.error(f"Claude Haiku streaming failed: {e}. Falling back to Gemini stream...")
+                logger.info(f"Calling {provider.upper()} stream: {model_name} ...")
 
-        # --- Gemini stream fallback ---
-        if self.gemini_client:
-            gemini_messages = []
-            for msg in messages:
-                if msg["role"] == "system":
-                    continue
-                role = "user" if msg["role"] == "customer" else "model"
-                gemini_messages.append({"role": role, "parts": [{"text": msg["content"]}]})
-
-            if not gemini_messages:
-                gemini_messages = [{"role": "user", "parts": [{"text": "Hello"}]}]
-
-            for model_name in self.get_healthy_models():
-                try:
-                    logger.info(f"Calling Gemini Stream Fallback with model: {model_name}...")
-                    response = await self.gemini_client.aio.models.generate_content_stream(
-                        model=model_name,
-                        contents=gemini_messages,
-                        config=types.GenerateContentConfig(
-                            system_instruction=system_text  # ← same text as Claude
-                        )
-                    )
-
-                    response_iter = response.__aiter__()
-                    try:
-                        # Wait at most 2.5 seconds for first stream chunk
-                        first_chunk = await asyncio.wait_for(response_iter.__anext__(), timeout=2.5)
-                        if first_chunk.text:
-                            yield first_chunk.text, None
-                    except asyncio.TimeoutError:
-                        logger.warning(f"Gemini model {model_name} first chunk timeout (2.5s). Falling back...")
-                        raise RuntimeError(f"First chunk timeout on model {model_name}")
-
-                    async for chunk in response_iter:
-                        if chunk.text:
-                            yield chunk.text, None
-
-                    # BUG FIX: usage_metadata lives on the final aggregated response object,
-                    # NOT the streaming iterator. Collect it from the last chunk if available.
-                    # The Gemini SDK accumulates usage on the response object after iteration.
-                    try:
-                        if hasattr(response, "usage_metadata") and response.usage_metadata:
-                            token_usage["prompt_tokens"] = response.usage_metadata.prompt_token_count or 0
-                            token_usage["completion_tokens"] = response.usage_metadata.candidates_token_count or 0
-                    except Exception:
-                        pass
-
-                    logger.info(f"Gemini model {model_name} Stream finished. Tokens: {token_usage}")
+                if provider == "gemini":
+                    # Gemini streaming (alt=sse)
+                    url = GEMINI_STREAM_URL.format(model=model_name) + f"?key={self.gemini_key}&alt=sse"
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        async with client.stream("POST", url, json=gemini_body) as response:
+                            if response.status_code != 200:
+                                err = await response.aread()
+                                raise RuntimeError(f"Gemini stream HTTP {response.status_code}: {err[:150]}")
+                            async for line in response.aiter_lines():
+                                if not line.startswith("data:"):
+                                    continue
+                                payload = line[5:].strip()
+                                if payload in ("[DONE]", ""):
+                                    continue
+                                try:
+                                    data = json.loads(payload)
+                                except json.JSONDecodeError:
+                                    continue
+                                parts = (data.get("candidates", [{}])[0]
+                                             .get("content", {})
+                                             .get("parts", []))
+                                for part in parts:
+                                    chunk = part.get("text", "")
+                                    if chunk:
+                                        yield chunk, None
+                                # Collect usage metadata from final chunk
+                                usage = data.get("usageMetadata")
+                                if usage:
+                                    token_usage["prompt_tokens"]     = usage.get("promptTokenCount", 0)
+                                    token_usage["completion_tokens"]  = usage.get("candidatesTokenCount", 0)
+                    logger.info(f"[GEMINI] {model_name} stream done. Tokens: {token_usage}")
                     yield "", token_usage
                     return
-                except Exception as e:
-                    logger.error(f"Gemini model {model_name} streaming failed: {e}.")
-                    import time
-                    self.model_failures[model_name] = time.time()
-                    logger.info("Trying next model...")
 
-        # --- Graceful offline streaming fallback ---
-        logger.warning("No LLM services succeeded for stream. Returning graceful mock stream.")
-        fallback_text = (
+                else:
+                    # Groq streaming (OpenAI SSE)
+                    headers = {"Authorization": f"Bearer {self.groq_key}", "Content-Type": "application/json"}
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        async with client.stream(
+                            "POST", GROQ_API_URL, headers=headers,
+                            json={"model": model_name, "messages": groq_messages,
+                                  "temperature": 0.7, "max_tokens": 1000, "stream": True},
+                            timeout=httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0),
+                        ) as response:
+                            if response.status_code != 200:
+                                err = await response.aread()
+                                raise RuntimeError(f"Groq stream HTTP {response.status_code}: {err[:150]}")
+                            async for line in response.aiter_lines():
+                                if not line.startswith("data:"):
+                                    continue
+                                payload = line[5:].strip()
+                                if payload == "[DONE]":
+                                    break
+                                try:
+                                    data = json.loads(payload)
+                                except json.JSONDecodeError:
+                                    continue
+                                text_piece = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                if text_piece:
+                                    yield text_piece, None
+                                usage = data.get("usage")
+                                if usage:
+                                    token_usage["prompt_tokens"]    = usage.get("prompt_tokens", 0)
+                                    token_usage["completion_tokens"] = usage.get("completion_tokens", 0)
+                    logger.info(f"[GROQ] {model_name} stream done. Tokens: {token_usage}")
+                    yield "", token_usage
+                    return
+
+            except Exception as e:
+                logger.error(f"[{provider.upper()}] {model_name} stream failed: {e}. Trying next...")
+                self.model_failures[model_name] = time.time()
+
+        # All providers exhausted
+        async for chunk in self._fallback_stream(token_usage):
+            yield chunk
+
+    # -----------------------------------------------------------------------
+    # Offline fallback helpers
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _fallback_text() -> str:
+        return (
             "I'm sorry, I'm experiencing a minor connection issue right now. "
             "Please call us back at +91 9000666914 or send an email to info@fueltracks.in, "
             "and we'll help you immediately. Thank you for your patience."
         )
-        for word in fallback_text.split():
+
+    async def _fallback_stream(self, token_usage: dict):
+        logger.warning("All LLM providers failed — returning graceful offline stream.")
+        for word in self._fallback_text().split():
             yield word + " ", None
             await asyncio.sleep(0.04)
         yield "", token_usage
-
-    @_anthropic_retry
-    async def _claude_stream(self, system_text: str, claude_messages: list):
-        """
-        Isolated Anthropic streaming call — wrapped with tenacity retry.
-        This is an async generator; tenacity re-raises on non-retryable errors.
-        """
-        logger.info("Calling Claude Haiku Stream...")
-        token_usage = {"prompt_tokens": 0, "completion_tokens": 0}
-        async with self.claude_client.messages.stream(
-            model="claude-3-haiku-20240307",
-            max_tokens=150,
-            system=system_text,
-            messages=claude_messages,
-        ) as stream:
-            async for event in stream:
-                if event.type == "content_block_delta":
-                    yield event.delta.text, None
-
-            message = await stream.get_final_message()
-            token_usage["prompt_tokens"] = message.usage.input_tokens
-            token_usage["completion_tokens"] = message.usage.output_tokens
-            logger.info(f"Claude Haiku Stream finished. Tokens: {token_usage}")
-            yield "", token_usage

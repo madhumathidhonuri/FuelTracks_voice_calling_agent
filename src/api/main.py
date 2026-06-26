@@ -29,6 +29,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+from src.utils.startup_check import check_env_vars
+check_env_vars()
+
 from contextlib import asynccontextmanager
 
 @asynccontextmanager
@@ -150,32 +153,22 @@ async def _check_sarvam() -> dict:
         return {"status": "unreachable", "detail": str(e)}
 
 
-async def _check_anthropic() -> dict:
-    """Check Anthropic connectivity by listing models (lightweight API call)."""
-    key = settings.ANTHROPIC_API_KEY
-    if not key or "mock_" in key or key == "your_anthropic_api_key":
-        return {"status": "misconfigured", "detail": "API key not set"}
+async def _check_groq() -> dict:
+    """Check that a Groq API key is configured and the API is reachable."""
+    key = settings.GROQ_API_KEY
+    if not key or "mock_" in key or key == "your_groq_api_key":
+        return {"status": "misconfigured", "detail": "GROQ_API_KEY not set"}
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             r = await client.get(
-                "https://api.anthropic.com/v1/models",
-                headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
+                "https://api.groq.com/openai/v1/models",
+                headers={"Authorization": f"Bearer {key}"},
             )
         if r.status_code == 200:
             return {"status": "ok"}
-        if r.status_code == 401:
-            return {"status": "auth_error", "http_status": r.status_code}
-        return {"status": "degraded", "http_status": r.status_code}
+        return {"status": "auth_error", "http_status": r.status_code}
     except Exception as e:
         return {"status": "unreachable", "detail": str(e)}
-
-
-async def _check_gemini() -> dict:
-    """Check that a Gemini API key is configured (no live call — avoids quota)."""
-    key = settings.GEMINI_API_KEY
-    if not key or "mock_" in key or key == "your_gemini_api_key":
-        return {"status": "misconfigured", "detail": "API key not set"}
-    return {"status": "configured"}
 
 
 def _check_database() -> dict:
@@ -191,32 +184,54 @@ def _check_database() -> dict:
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
+async def _check_gemini() -> dict:
+    """Check that a Gemini API key is configured and the API is reachable."""
+    key = settings.GEMINI_API_KEY
+    if not key or "mock_" in key or key == "your_gemini_api_key":
+        return {"status": "misconfigured", "detail": "GEMINI_API_KEY not set"}
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={key}"
+        body = {
+            "contents": [{"parts": [{"text": "Hello"}]}],
+            "generationConfig": {"maxOutputTokens": 1}
+        }
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(url, json=body)
+        if r.status_code == 200:
+            return {"status": "ok"}
+        elif r.status_code == 429:
+            return {"status": "quota_exhausted", "detail": "Rate limit / Quota exceeded (429)"}
+        return {"status": "auth_error", "http_status": r.status_code, "detail": r.text[:200]}
+    except Exception as e:
+        return {"status": "unreachable", "detail": str(e)}
+
 
 # Structured /health endpoint
 @app.get("/health")
 async def health_check():
     """
     Comprehensive health check that probes each external dependency.
-    Returns HTTP 200 when all services are reachable; HTTP 503 otherwise.
+    Returns HTTP 200 when critical services and at least one LLM are functional; HTTP 503 otherwise.
     """
-    sarvam, anthropic_status, gemini, database = await asyncio.gather(
+    sarvam, gemini, groq, database = await asyncio.gather(
         _check_sarvam(),
-        _check_anthropic(),
         _check_gemini(),
+        _check_groq(),
         asyncio.get_event_loop().run_in_executor(None, _check_database),
     )
 
     services = {
         "sarvam": sarvam,
-        "anthropic": anthropic_status,
         "gemini": gemini,
+        "groq": groq,
         "database": database,
     }
 
-    all_ok = all(
-        s.get("status") in ("ok", "configured")
-        for s in services.values()
-    )
+    sarvam_ok = sarvam.get("status") == "ok"
+    database_ok = database.get("status") == "ok"
+    llm_ok = (gemini.get("status") == "ok") or (groq.get("status") == "ok")
+
+    all_ok = sarvam_ok and database_ok and llm_ok
     overall = "healthy" if all_ok else "degraded"
     status_code = 200 if all_ok else 503
 

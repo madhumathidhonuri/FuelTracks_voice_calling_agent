@@ -47,12 +47,13 @@ async def websocket_endpoint(
             message = await websocket.receive_json()
             event_type = message.get("event")
             
-            # Check call duration limit (hard limit at 110 seconds)
+            # Check call duration limit (hard limit at 110 seconds for marketing, 3 minutes/180 seconds for others)
             if session:
                 from datetime import datetime
                 elapsed = (datetime.now() - session.start_time).total_seconds()
-                if elapsed > 110.0:
-                    logger.warning(f"Call {session.call_sid} exceeded duration limit of 110 seconds. Terminating.")
+                limit = 110.0 if session.call_type == "marketing" else 180.0
+                if elapsed > limit:
+                    logger.warning(f"Call {session.call_sid} exceeded duration limit of {limit} seconds. Terminating.")
                     break
             
             if event_type == "start":

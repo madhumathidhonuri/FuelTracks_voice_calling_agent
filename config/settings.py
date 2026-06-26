@@ -15,8 +15,8 @@ class Settings:
     EXOTEL_API_URL: str = os.getenv("EXOTEL_API_URL", "https://api.in.exotel.com")
     
     SARVAM_API_KEY: str = os.getenv("SARVAM_API_KEY", "")
-    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///voice_calling.db")
     HOST: str = os.getenv("HOST", "0.0.0.0")
