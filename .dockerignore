@@ -1,0 +1,45 @@
+# .dockerignore — files excluded from Docker build context
+
+# Secrets
+.env
+
+# Local databases and logs
+*.db
+*.log
+*.log.*
+
+# Development scratch scripts
+scratch/
+
+# Git history
+.git
+.gitignore
+.github/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+
+# IDE / OS
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# Test databases created during test runs
+test_*.db
+
+# Node / npm (if any frontend assets)
+node_modules/
+
+# Documentation
+*.md
+docs/

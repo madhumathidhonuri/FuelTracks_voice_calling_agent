@@ -112,6 +112,51 @@ class TestCallSimulation(unittest.TestCase):
         self.assertFalse(active)
         self.assertTrue(stopped)
 
+    def test_silero_based_vad(self):
+        # Initialize VAD with a threshold for Silero (e.g. 0.5)
+        vad = VoiceActivityDetector(sample_rate=16000, threshold=0.5, silence_timeout_ms=500)
+        self.assertTrue(vad._use_silero)
+        
+        # Mock the Silero ONNX model call
+        from unittest.mock import MagicMock
+        original_model = VoiceActivityDetector._model
+        mock_model = MagicMock()
+        VoiceActivityDetector._model = mock_model
+        
+        try:
+            # Silence (confidence 0.01 < threshold 0.5)
+            mock_model.return_value = 0.01
+            silence = b"\x00" * 1024  # 512 samples = 32ms at 16kHz
+            active, stopped = vad.process_chunk(silence)
+            self.assertFalse(active)
+            
+            # Speech starts (confidence 0.99 >= threshold 0.5)
+            mock_model.return_value = 0.99
+            speech = b"\x00" * 1024
+            active, stopped = vad.process_chunk(speech)
+            self.assertTrue(active)
+            self.assertFalse(stopped)
+            
+            # Speech continues
+            active, stopped = vad.process_chunk(speech)
+            self.assertTrue(active)
+            
+            # Silence starts
+            mock_model.return_value = 0.01
+            # Each chunk is 32ms. Silence timeout is 500ms.
+            # We need at least 500ms / 32ms = 16 chunks of silence to trigger stop.
+            for _ in range(15):
+                active, stopped = vad.process_chunk(silence)
+                self.assertTrue(active)
+                self.assertFalse(stopped)
+                
+            active, stopped = vad.process_chunk(silence)
+            self.assertFalse(active)
+            self.assertTrue(stopped)
+        finally:
+            # Restore
+            VoiceActivityDetector._model = original_model
+
     def test_language_profiling(self):
         profile = LanguageProfile()
         

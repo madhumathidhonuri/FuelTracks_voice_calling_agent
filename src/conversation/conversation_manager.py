@@ -3,7 +3,7 @@ from typing import Dict, Any, Tuple, List
 from src.stt.language_profile import LanguageProfile
 from src.conversation.llm_client import LLMClient
 from src.conversation.prompt_builder import build_system_prompt
-from src.storage.database import add_transcript_turn
+from src.storage.database import add_transcript_turn, aadd_transcript_turn
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +124,7 @@ class ConversationManager:
         Register caller input, update profile, and resolve inbound routing if necessary.
         """
         # Save transcript to local DB
-        add_transcript_turn(self.call_sid, "customer", text, detected_language, confidence)
+        await aadd_transcript_turn(self.call_sid, "customer", text, detected_language, confidence)
         
         # Update rolling language profile
         self.language_profile.update(detected_language, confidence, text)
@@ -216,6 +216,6 @@ class ConversationManager:
         
         # Append agent response to history and DB
         self.history.append({"role": "agent", "content": response_text})
-        add_transcript_turn(self.call_sid, "agent", response_text)
+        await aadd_transcript_turn(self.call_sid, "agent", response_text)
         
         return response_text, token_usage

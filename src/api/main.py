@@ -9,13 +9,14 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks, F
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from config.settings import settings
-from src.storage.database import init_db, get_call_logs
+from src.storage.database import init_db, get_call_logs, get_db_path
 from src.telephony.webhook_routes import router as webhook_router
 from src.telephony.exotel_handler import router as ws_router
 import shutil
 import os
 import asyncio
 from pathlib import Path
+import httpx
 
 # Configure logging
 logging.basicConfig(
@@ -132,7 +133,100 @@ async def serve_dashboard():
     with open(template_path, "r", encoding="utf-8") as f:
         return f.read()
 
-# API Health endpoint
+# ---------------------------------------------------------------------------
+# Health check helpers
+# ---------------------------------------------------------------------------
+
+async def _check_sarvam() -> dict:
+    """Check if Sarvam AI API is reachable via a lightweight HEAD request."""
+    key = settings.SARVAM_API_KEY
+    if not key or "mock_" in key or key == "your_sarvam_api_key":
+        return {"status": "misconfigured", "detail": "API key not set"}
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.head("https://api.sarvam.ai", headers={"api-subscription-key": key})
+        return {"status": "ok", "http_status": r.status_code}
+    except Exception as e:
+        return {"status": "unreachable", "detail": str(e)}
+
+
+async def _check_anthropic() -> dict:
+    """Check Anthropic connectivity by listing models (lightweight API call)."""
+    key = settings.ANTHROPIC_API_KEY
+    if not key or "mock_" in key or key == "your_anthropic_api_key":
+        return {"status": "misconfigured", "detail": "API key not set"}
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(
+                "https://api.anthropic.com/v1/models",
+                headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
+            )
+        if r.status_code == 200:
+            return {"status": "ok"}
+        if r.status_code == 401:
+            return {"status": "auth_error", "http_status": r.status_code}
+        return {"status": "degraded", "http_status": r.status_code}
+    except Exception as e:
+        return {"status": "unreachable", "detail": str(e)}
+
+
+async def _check_gemini() -> dict:
+    """Check that a Gemini API key is configured (no live call — avoids quota)."""
+    key = settings.GEMINI_API_KEY
+    if not key or "mock_" in key or key == "your_gemini_api_key":
+        return {"status": "misconfigured", "detail": "API key not set"}
+    return {"status": "configured"}
+
+
+def _check_database() -> dict:
+    """Verify SQLite DB file exists and is readable."""
+    try:
+        db_path = get_db_path()
+        if not db_path.exists():
+            return {"status": "missing", "path": str(db_path)}
+        import sqlite3
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("SELECT 1 FROM calls LIMIT 1")
+        return {"status": "ok", "path": str(db_path)}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+
+# Structured /health endpoint
+@app.get("/health")
+async def health_check():
+    """
+    Comprehensive health check that probes each external dependency.
+    Returns HTTP 200 when all services are reachable; HTTP 503 otherwise.
+    """
+    sarvam, anthropic_status, gemini, database = await asyncio.gather(
+        _check_sarvam(),
+        _check_anthropic(),
+        _check_gemini(),
+        asyncio.get_event_loop().run_in_executor(None, _check_database),
+    )
+
+    services = {
+        "sarvam": sarvam,
+        "anthropic": anthropic_status,
+        "gemini": gemini,
+        "database": database,
+    }
+
+    all_ok = all(
+        s.get("status") in ("ok", "configured")
+        for s in services.values()
+    )
+    overall = "healthy" if all_ok else "degraded"
+    status_code = 200 if all_ok else 503
+
+    return JSONResponse(
+        status_code=status_code,
+        content={"status": overall, "services": services},
+    )
+
+
+# Legacy shallow health endpoint (kept for backward compat)
 @app.get("/api/health")
 async def api_health():
     return {

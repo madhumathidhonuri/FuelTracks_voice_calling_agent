@@ -1,81 +1,214 @@
+"""
+Voice Activity Detection (VAD)
+-------------------------------
+Uses Silero VAD (ONNX Runtime) for accurate, model-based end-of-speech detection.
+
+The calculate_rms() helper is intentionally kept for the fast barge-in pre-screen
+in pipeline.py, which needs microsecond-latency energy checks during agent speech.
+"""
 import math
 import struct
+import logging
+import numpy as np
+from typing import Tuple
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def calculate_rms(audio_chunk: bytes) -> float:
     """
     Calculate the Root Mean Square (RMS) energy of a 16-bit mono PCM audio chunk.
+    Used by pipeline.py for fast barge-in detection during agent playback.
     """
     if not audio_chunk:
         return 0.0
-        
-    # Each sample is 2 bytes (16-bit)
     num_samples = len(audio_chunk) // 2
     if num_samples == 0:
         return 0.0
-    
-    # Form formatting string for little-endian 16-bit signed shorts '<h'
     format_str = f"<{num_samples}h"
     try:
-        # Unpack binary data into integers
         samples = struct.unpack(format_str, audio_chunk[:num_samples * 2])
     except struct.error:
         return 0.0
-        
     sum_squares = sum(float(s) * float(s) for s in samples)
-    mean_square = sum_squares / num_samples
-    return math.sqrt(mean_square)
+    return math.sqrt(sum_squares / num_samples)
+
+
+def _pcm_bytes_to_float32(pcm_bytes: bytes) -> np.ndarray:
+    """Convert 16-bit PCM bytes to float32 numpy array in range [-1, 1]."""
+    samples = np.frombuffer(pcm_bytes, dtype=np.int16)
+    return samples.astype(np.float32) / 32768.0
+
+
+# ---------------------------------------------------------------------------
+# Silero VAD
+# ---------------------------------------------------------------------------
 
 class VoiceActivityDetector:
-    def __init__(self, sample_rate: int = 16000, threshold: float = 800.0, silence_timeout_ms: int = 1000):
+    """
+    Model-based Voice Activity Detector using Silero VAD (ONNX).
+
+    Silero provides much higher accuracy than energy thresholds — especially
+    important for Indian phone calls with background noise, breathing, and
+    bilingual speech where RMS alone fires false-positives constantly.
+
+    On first use the ONNX model (~2MB) is downloaded and cached by
+    torch.hub (or silero-vad's own cache, depending on version installed).
+    Subsequent startups load from the local cache — no internet required.
+    """
+
+    # Class-level shared model to avoid reloading on every call session
+    _model = None
+    _get_speech_timestamps = None
+    _model_sample_rate = 16000
+
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        threshold: float = 0.5,
+        silence_timeout_ms: int = 500,
+    ):
         """
-        Energy-based Voice Activity Detector.
-        :param sample_rate: 8000 or 16000
-        :param threshold: RMS energy threshold above which speech is detected
-        :param silence_timeout_ms: Duration of consecutive silence to trigger end-of-speech
+        :param sample_rate: Input PCM sample rate (8000 or 16000 Hz).
+        :param threshold:   Silero confidence threshold [0, 1]. 0.5 is the recommended default.
+        :param silence_timeout_ms: Consecutive silence (ms) before speech is declared ended.
         """
         self.sample_rate = sample_rate
         self.threshold = threshold
         self.silence_timeout_ms = silence_timeout_ms
-        self.is_speech_active = False
-        self.silence_duration_ms = 0
-        
-    def reset(self):
+
         self.is_speech_active = False
         self.silence_duration_ms = 0
 
-    def process_chunk(self, audio_chunk: bytes) -> tuple[bool, bool]:
+        # Accumulated float32 audio for Silero (it processes fixed windows)
+        self._audio_buffer: np.ndarray = np.array([], dtype=np.float32)
+
+        # Silero window size: 512 samples @ 16kHz or 256 @ 8kHz
+        self._window_size_samples = 512 if sample_rate == 16000 else 256
+
+        # If threshold > 1.0, we treat it as an energy-based detector and bypass Silero VAD model.
+        if threshold > 1.0:
+            self._use_silero = False
+            logger.info(f"Threshold {threshold} > 1.0, using energy-based VAD fallback.")
+        else:
+            self._use_silero = True
+            VoiceActivityDetector._load_model()
+
+    @classmethod
+    def _load_model(cls):
+        """Lazy-load Silero VAD once per process using ONNX backend (no torchaudio needed)."""
+        if cls._model is not None:
+            return
+        try:
+            import sys
+            import unittest.mock as mock
+            sys.modules['torchaudio'] = mock.Mock()
+            from silero_vad import load_silero_vad  # type: ignore
+            # onnx=True avoids the torchaudio DLL dependency entirely
+            cls._model = load_silero_vad(onnx=True)
+            logger.info("Silero VAD model loaded successfully (ONNX backend).")
+        except ImportError:
+            logger.error(
+                "silero-vad package not found. "
+                "Install it with: pip install silero-vad onnxruntime\n"
+                "Falling back to energy-based VAD."
+            )
+            cls._model = None
+        except Exception as e:
+            logger.error(f"Failed to load Silero VAD model: {e}. Falling back to energy-based VAD.")
+            cls._model = None
+
+    def reset(self):
+        """Reset VAD state between utterances."""
+        self.is_speech_active = False
+        self.silence_duration_ms = 0
+        self._audio_buffer = np.array([], dtype=np.float32)
+        # Reset Silero internal LSTM state
+        if self._model is not None:
+            try:
+                self._model.reset_states()
+            except Exception:
+                pass
+
+    def process_chunk(self, audio_chunk: bytes) -> Tuple[bool, bool]:
         """
-        Process a chunk of audio.
+        Process a raw PCM audio chunk (16-bit mono, little-endian).
+
         Returns:
             (is_speech_active, speech_stopped_now)
         """
-        rms = calculate_rms(audio_chunk)
-        
-        # Calculate duration of the chunk in milliseconds
-        # 16-bit mono PCM is 2 bytes per sample
-        bytes_per_sample = 2
-        num_samples = len(audio_chunk) // bytes_per_sample
-        if num_samples == 0:
+        if not audio_chunk:
             return self.is_speech_active, False
-            
-        chunk_duration_ms = (num_samples / self.sample_rate) * 1000
-        
+
+        # Chunk duration in ms (for silence timeout tracking)
+        num_samples_chunk = len(audio_chunk) // 2
+        chunk_duration_ms = (num_samples_chunk / self.sample_rate) * 1000
+
+        # --- Silero path ---
+        if self._use_silero and self._model is not None:
+            return self._process_silero(audio_chunk, chunk_duration_ms)
+
+        # --- Energy fallback (if Silero disabled or failed to load) ---
+        return self._process_energy(audio_chunk, chunk_duration_ms)
+
+    def _process_silero(self, audio_chunk: bytes, chunk_duration_ms: float) -> Tuple[bool, bool]:
+        """Run Silero ONNX inference on the accumulated audio buffer (numpy only, no torch)."""
+        new_samples = _pcm_bytes_to_float32(audio_chunk)
+
+        # Resample 8kHz → 16kHz for Silero if needed
+        if self.sample_rate == 8000:
+            new_samples = np.repeat(new_samples, 2)
+
+        self._audio_buffer = np.concatenate([self._audio_buffer, new_samples])
+
+        speech_detected_in_chunk = False
+
+        # Run inference in fixed windows
+        while len(self._audio_buffer) >= self._window_size_samples:
+            window = self._audio_buffer[: self._window_size_samples]
+            self._audio_buffer = self._audio_buffer[self._window_size_samples :]
+
+            try:
+                import torch
+                tensor_window = torch.from_numpy(window)
+                # ONNX Silero model wrapper (OnnxWrapper) expects a torch.Tensor
+                confidence = self._model(tensor_window, self._model_sample_rate)
+                # Handle case where confidence is a torch.Tensor, numpy array or scalar
+                if hasattr(confidence, 'item'):
+                    confidence = confidence.item()
+                confidence = float(confidence)
+                if confidence >= self.threshold:
+                    speech_detected_in_chunk = True
+            except Exception as e:
+                logger.warning(f"Silero inference error: {e}. Using energy fallback for this chunk.")
+                rms = calculate_rms(audio_chunk)
+                speech_detected_in_chunk = rms > 800.0
+
+        return self._update_state(speech_detected_in_chunk, chunk_duration_ms)
+
+    def _process_energy(self, audio_chunk: bytes, chunk_duration_ms: float) -> Tuple[bool, bool]:
+        """Energy-based fallback (used only if Silero model is unavailable)."""
+        rms = calculate_rms(audio_chunk)
+        speech_detected = rms > 800.0
+        return self._update_state(speech_detected, chunk_duration_ms)
+
+    def _update_state(self, speech_detected: bool, chunk_duration_ms: float) -> Tuple[bool, bool]:
+        """Shared state-machine: updates is_speech_active and silence counter."""
         speech_stopped_now = False
-        
-        if rms > self.threshold:
-            # User is speaking
+
+        if speech_detected:
             if not self.is_speech_active:
-                # Speech started
                 self.is_speech_active = True
             self.silence_duration_ms = 0
         else:
-            # Silence detected in this chunk
             if self.is_speech_active:
                 self.silence_duration_ms += chunk_duration_ms
                 if self.silence_duration_ms >= self.silence_timeout_ms:
-                    # Speech stopped
                     self.is_speech_active = False
                     self.silence_duration_ms = 0
                     speech_stopped_now = True
-                    
+
         return self.is_speech_active, speech_stopped_now

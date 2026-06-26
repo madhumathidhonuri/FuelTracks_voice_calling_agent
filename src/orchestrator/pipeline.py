@@ -7,7 +7,7 @@ from src.audio.vad import VoiceActivityDetector, calculate_rms
 from src.stt.sarvam_stt import SarvamSTTClient
 from src.tts.sarvam_tts import SarvamTTSClient
 from src.orchestrator.turn_manager import TurnManager
-from src.storage.database import add_transcript_turn
+from src.storage.database import add_transcript_turn, aadd_transcript_turn
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +124,7 @@ class AudioPipeline:
             
             # Log greeting to conversation history and database
             self.session.conversation_manager.history.append({"role": "agent", "content": full_greeting})
-            add_transcript_turn(self.session.call_sid, "agent", full_greeting)
+            await aadd_transcript_turn(self.session.call_sid, "agent", full_greeting)
             
             # Enqueue each sentence directly for TTS synthesis concurrently
             tts_lang = self.session.conversation_manager.language_profile.primary_language
@@ -360,7 +360,7 @@ class AudioPipeline:
             # Log full agent turn in history and DB
             if full_response.strip():
                 self.session.conversation_manager.history.append({"role": "agent", "content": full_response.strip()})
-                add_transcript_turn(self.session.call_sid, "agent", full_response.strip())
+                await aadd_transcript_turn(self.session.call_sid, "agent", full_response.strip())
                 
                 # Check for goodbye/call completion to trigger automatic hangup
                 lower_resp = full_response.lower()
