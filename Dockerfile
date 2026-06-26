@@ -1,7 +1,7 @@
 # ============================================================
 # Stage 1: builder — install deps with pip into /install
 # ============================================================
-FROM python:3.12-slim AS builder
+FROM python:3.11-slim AS builder
 
 WORKDIR /install
 
@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir --prefix=/install/prefix -r requirements.txt
 # ============================================================
 # Stage 2: runtime — lean final image
 # ============================================================
-FROM python:3.12-slim AS runtime
+FROM python:3.11-slim AS runtime
 
 WORKDIR /app
 

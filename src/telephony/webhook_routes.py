@@ -36,7 +36,7 @@ async def handle_inbound_call(
         resolved_call_type = qp["call_type"]
         
     # 2. Create the session
-    session = call_manager.create_session(
+    session = await call_manager.create_session(
         call_sid=CallSid,
         from_number=From,
         to_number=To,
@@ -79,7 +79,7 @@ async def handle_outbound_status(
         if Status in ["failed", "no-answer", "busy"]:
             # Close the session if the call failed
             stream_sid = session.stream_sid or f"failed_{CallSid}"
-            call_manager.close_session(stream_sid, outcome=Status)
+            await call_manager.close_session(stream_sid, outcome=Status)
             
     return JSONResponse(content={"status": "ok"})
 
@@ -102,9 +102,9 @@ async def handle_call_event(
             # If the session is still active in memory, close it
             stream_sid = session.stream_sid
             if stream_sid:
-                call_manager.close_session(stream_sid, outcome=Event)
+                await call_manager.close_session(stream_sid, outcome=Event)
             else:
                 # If stream never connected
-                call_manager.close_session(f"no_stream_{CallSid}", outcome=Event)
+                await call_manager.close_session(f"no_stream_{CallSid}", outcome=Event)
                 
     return JSONResponse(content={"status": "ok"})

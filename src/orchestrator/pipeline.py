@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import time
 import re
 from typing import Tuple, List, Set
 from src.telephony.call_manager import CallSession
@@ -227,57 +228,83 @@ class AudioPipeline:
     async def _stt_worker(self):
         """
         Worker task to transcribe complete speech utterances sequentially.
+        Gracefully handles STT failures with a fallback TTS response.
         """
         while True:
             try:
                 audio_data = await self.stt_queue.get()
-                
-                # Reset barge-in flag before transcribing, because any barge-in during/after this point is a new interruption.
                 self.session.barge_in_triggered = False
-                
-                # Transcribe
-                transcript, detected_lang, confidence, duration_sec = await self.stt_client.transcribe(
-                    audio_data, 
-                    self.sample_rate
-                )
-                self.session.stt_seconds_logged += duration_sec
-                logger.info(f"STT: '{transcript}' [Lang: {detected_lang}, Conf: {confidence:.2f}, Dur: {duration_sec:.2f}s]")
-                
-                # If a barge-in happened while we were transcribing (customer started speaking again), discard this old turn
-                if self.session.barge_in_triggered:
-                    logger.info("Barge-in triggered during STT transcription. Discarding old transcript.")
-                    self.stt_queue.task_done()
-                    continue
-                    
-                if not transcript.strip() or confidence < 0.30:
-                    if confidence < 0.30 and transcript.strip():
-                        logger.info(f"Ignoring low-confidence STT transcript: '{transcript}' (confidence: {confidence:.2f})")
+
+                # --- STT with latency tracking ---
+                stt_start = time.monotonic()
+                try:
+                    transcript, detected_lang, confidence, duration_sec = await self.stt_client.transcribe(
+                        audio_data,
+                        self.sample_rate
+                    )
+                    stt_latency_ms = (time.monotonic() - stt_start) * 1000
+                    self.session.stt_seconds_logged += duration_sec
+                    self.session.stt_latencies.append(stt_latency_ms)
+                    logger.info(f"STT: '{transcript}' [Lang: {detected_lang}, Conf: {confidence:.2f}, "
+                                f"Dur: {duration_sec:.2f}s, Latency: {stt_latency_ms:.0f}ms]")
+                except Exception as stt_err:
+                    logger.error(f"STT transcription failed: {stt_err}. Sending fallback response.")
+                    await self._send_fallback_tts("Sorry, I didn't catch that. Could you please repeat?")
                     self.processing_turn = False
                     self.stt_queue.task_done()
                     continue
-                    
-                # Append customer turn to history
+
+                if self.session.barge_in_triggered:
+                    logger.info("Barge-in triggered during STT. Discarding old transcript.")
+                    self.stt_queue.task_done()
+                    continue
+
+                if not transcript.strip() or confidence < 0.30:
+                    if confidence < 0.30 and transcript.strip():
+                        logger.info(f"Ignoring low-confidence STT: '{transcript}' ({confidence:.2f})")
+                    self.processing_turn = False
+                    self.stt_queue.task_done()
+                    continue
+
                 await self.session.add_customer_turn(
                     text=transcript,
                     detected_language=detected_lang,
                     confidence=confidence
                 )
-                
-                # Spin off streaming LLM response generation
+
                 task = asyncio.create_task(self._process_llm_stream())
                 self.active_tasks.add(task)
                 task.add_done_callback(self.active_tasks.discard)
-                
+
                 self.stt_queue.task_done()
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.exception(f"Error in STT worker: {e}")
+                logger.exception(f"Unexpected error in STT worker: {e}")
                 self.processing_turn = False
+
+    async def _send_fallback_tts(self, message: str):
+        """Send a hardcoded fallback TTS response without going through the LLM."""
+        try:
+            tts_lang = self.session.conversation_manager.language_profile.primary_language
+            task = asyncio.create_task(
+                self.tts_client.text_to_speech(
+                    text=message,
+                    language_code=tts_lang,
+                    speaker="shreya"
+                )
+            )
+            self.active_tasks.add(task)
+            task.add_done_callback(self.active_tasks.discard)
+            await self.tts_queue.put((task, message))
+        except Exception as e:
+            logger.error(f"Failed to send fallback TTS: {e}")
+            self.processing_turn = False
 
     async def _process_llm_stream(self):
         """
         Task to stream LLM response tokens, split on sentence boundaries, and enqueue sentences.
+        Handles LLM failures gracefully with Gemini cascade then apology TTS.
         """
         try:
             purpose_map = {
@@ -315,12 +342,19 @@ class AudioPipeline:
             full_response = ""
             final_token_usage = None
             
-            # Stream tokens
+            # Stream tokens with LLM latency tracking (TTFT = Time To First Token)
+            llm_start = time.monotonic()
+            ttft_recorded = False
             async for chunk, usage in self.session.conversation_manager.llm_client.generate_response_stream(
-                system_prompt, 
+                system_prompt,
                 self.session.conversation_manager.history
             ):
                 if chunk:
+                    if not ttft_recorded:
+                        llm_latency_ms = (time.monotonic() - llm_start) * 1000
+                        self.session.llm_latencies.append(llm_latency_ms)
+                        logger.info(f"LLM first token latency: {llm_latency_ms:.0f}ms")
+                        ttft_recorded = True
                     text_buffer += chunk
                     full_response += chunk
                     # Split sentences
@@ -380,26 +414,41 @@ class AudioPipeline:
         except asyncio.CancelledError:
             logger.info("LLM stream generation task was cancelled.")
         except Exception as e:
-            logger.exception(f"Error in LLM stream task: {e}")
+            logger.error(f"LLM stream failed: {e}. Sending apology response.")
+            await self._send_fallback_tts(
+                "I'm sorry, I'm having a connection issue. "
+                "Please call us back at +91 9000666914 or email info@fueltracks.in."
+            )
             self.processing_turn = False
 
     async def _tts_worker(self):
         """
         Worker task to process pre-spawned TTS synthesis tasks in order.
+        Handles TTS failures gracefully by skipping failed sentences.
         """
         while True:
             try:
                 task, sentence = await self.tts_queue.get()
-                
+
+                tts_start = time.monotonic()
                 try:
                     tts_audio, tts_sample_rate, num_chars = await task
                 except asyncio.CancelledError:
                     logger.info(f"TTS task was cancelled for sentence: '{sentence}'")
                     self.tts_queue.task_done()
                     continue
-                
+                except Exception as tts_err:
+                    logger.error(f"TTS synthesis exception for '{sentence}': {tts_err}. Skipping sentence.")
+                    self.tts_queue.task_done()
+                    if self.tts_queue.empty() and self.playback_queue.empty() and len(self.active_tasks) == 0:
+                        logger.info("TTS failed and no remaining sentences. Resetting processing_turn.")
+                        self.processing_turn = False
+                    continue
+
+                tts_latency_ms = (time.monotonic() - tts_start) * 1000
+                self.session.tts_latencies.append(tts_latency_ms)
                 self.session.tts_characters_logged += num_chars
-                
+
                 if tts_audio:
                     if tts_sample_rate != self.sample_rate:
                         logger.info(f"Resampling TTS audio from {tts_sample_rate} Hz to {self.sample_rate} Hz for Exotel...")
@@ -407,12 +456,11 @@ class AudioPipeline:
                         samples = np.frombuffer(tts_audio, dtype=np.int16)
                         if len(samples) > 0:
                             if tts_sample_rate > self.sample_rate:
-                                # Apply low-pass filter to prevent aliasing
                                 window_size = int(round(tts_sample_rate / self.sample_rate))
                                 if window_size > 1:
                                     kernel = np.ones(window_size) / window_size
                                     samples = np.convolve(samples, kernel, mode='same').astype(np.int16)
-                            
+
                             num_samples = len(samples)
                             target_num_samples = int(num_samples * self.sample_rate / tts_sample_rate)
                             src_indices = np.arange(num_samples)
@@ -421,19 +469,19 @@ class AudioPipeline:
                             tts_audio = resampled_samples.tobytes()
                         tts_sample_rate = self.sample_rate
 
-                    logger.info(f"Enqueuing synthesized audio for: '{sentence}'")
+                    logger.info(f"Enqueuing synthesized audio for: '{sentence}' (TTS latency: {tts_latency_ms:.0f}ms)")
                     await self.playback_queue.put((tts_audio, tts_sample_rate, sentence))
                 else:
-                    logger.error(f"TTS synthesis failed for sentence: '{sentence}'")
+                    logger.error(f"TTS returned empty audio for sentence: '{sentence}'. Skipping.")
                     if self.tts_queue.empty() and self.playback_queue.empty() and len(self.active_tasks) == 0:
                         logger.info("TTS failed and no other sentences. Resetting processing_turn.")
                         self.processing_turn = False
-                    
+
                 self.tts_queue.task_done()
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.exception(f"Error in TTS worker: {e}")
+                logger.exception(f"Unexpected error in TTS worker: {e}")
                 self.processing_turn = False
 
     async def _playback_worker(self):

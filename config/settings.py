@@ -22,6 +22,7 @@ class Settings:
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "8000"))
     WEBSOCKET_URL: str = os.getenv("WEBSOCKET_URL", "ws://localhost:8000/ws/media")
+    VAD_MODE: str = os.getenv("VAD_MODE", "silero")
     
     # Path configuration
     BASE_DIR: Path = BASE_DIR

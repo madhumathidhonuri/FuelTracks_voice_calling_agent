@@ -3,7 +3,7 @@ import urllib.parse
 import httpx
 from typing import Dict, Any, Optional
 from config.settings import settings
-from src.storage.database import create_call
+from src.storage.database import acreate_call
 from src.audio.dns_resolver import resolve_hostname_ipv4
 from urllib.parse import urlparse
 
@@ -62,7 +62,7 @@ class OutboundCaller:
             import time
             mock_sid = f"mock-call-{formatted_number.replace('+', '')}-{int(time.time())}"
             logger.info(f"[SIMULATION] Mock Exotel credentials detected. Registering mock call: {mock_sid}")
-            create_call(
+            await acreate_call(
                 call_sid=mock_sid,
                 from_number=formatted_number,
                 to_number=self.caller_id,
@@ -158,7 +158,7 @@ class OutboundCaller:
                 logger.info(f"Outbound call successfully queued with Exotel. Call SID: {call_sid}")
                 
                 # Pre-log call in local SQLite database
-                create_call(
+                await acreate_call(
                     call_sid=call_sid,
                     from_number=formatted_number,
                     to_number=self.caller_id,

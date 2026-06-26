@@ -1,19 +1,84 @@
-# Environment variables (contains private API keys & credentials)
-.env
+# ============================================================
+# FuelTracks Voice Calling Agent — .gitignore
+# ============================================================
 
-# Python byte-code / cache directories
+# ── Secrets & Credentials ───────────────────────────────────
+# NEVER commit real credentials to version control
+.env
+*.pem
+*.key
+*.crt
+*.p12
+secrets/
+
+# ── Python byte-code & caches ───────────────────────────────
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 *.pyo
 *.pyd
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
 
-# Local databases
+# ── Local databases ─────────────────────────────────────────
 *.db
+*.sqlite
+*.sqlite3
 
-# Excel files (ignores all customer sheets except the format template)
+# ── Log files ───────────────────────────────────────────────
+*.log
+logs/
+server.log
+
+# ── Scratch / ad-hoc test scripts ───────────────────────────
+# These are local development experiments, not production code
+scratch/
+
+# ── Excel / data files (except the sample template) ─────────
 *.xlsx
 !customers_sample.xlsx
+*.csv
 
-# Log files
-*.log
+# ── Docker volumes & overrides ──────────────────────────────
+docker-compose.override.yml
+postgres-data/
+
+# ── IDE & Editor ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.suo
+*.user
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Virtual environments ─────────────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+.env.bak
+
+# ── Build artifacts ──────────────────────────────────────────
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+wheels/
+
+# ── OS generated files ───────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Desktop.ini

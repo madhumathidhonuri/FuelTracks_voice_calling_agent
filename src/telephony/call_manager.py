@@ -3,7 +3,7 @@ from datetime import datetime
 import logging
 from typing import Dict, Any, Optional
 from src.conversation.conversation_manager import ConversationManager
-from src.storage.database import create_call, update_call_end
+from src.storage.database import acreate_call, aupdate_call_end
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,11 @@ class CallSession:
         self.tts_characters_logged: int = 0
         self.llm_tokens_logged: int = 0
         
+        # Latency Metrics (stored as list of float milliseconds)
+        self.stt_latencies = []
+        self.llm_latencies = []
+        self.tts_latencies = []
+        
         # Conversation state
         self.conversation_manager = ConversationManager(call_sid)
         
@@ -45,12 +50,13 @@ class CallSession:
         """
         await self.conversation_manager.add_customer_turn(text, detected_language, confidence)
 
+
 class CallManager:
     def __init__(self):
         self.sessions_by_stream: Dict[str, CallSession] = {}
         self.sessions_by_call: Dict[str, CallSession] = {}
         
-    def create_session(
+    async def create_session(
         self, 
         call_sid: str, 
         from_number: str, 
@@ -58,13 +64,13 @@ class CallManager:
         call_type: str
     ) -> CallSession:
         """
-        Creates a call session and writes the initial record to the SQLite database.
+        Creates a call session and writes the initial record to the database.
         """
         session = CallSession(call_sid, from_number, to_number, call_type)
         self.sessions_by_call[call_sid] = session
         
-        # Log session start to DB
-        create_call(
+        # Log session start to DB asynchronously
+        await acreate_call(
             call_sid=call_sid,
             from_number=from_number,
             to_number=to_number,
@@ -90,7 +96,7 @@ class CallManager:
     def get_session_by_call(self, call_sid: str) -> Optional[CallSession]:
         return self.sessions_by_call.get(call_sid)
         
-    def close_session(self, stream_sid: str, outcome: str = "completed"):
+    async def close_session(self, stream_sid: str, outcome: str = "completed"):
         session = self.sessions_by_stream.pop(stream_sid, None)
         if session:
             # Remove from call map
@@ -100,20 +106,29 @@ class CallManager:
             end_time = datetime.now()
             duration = (end_time - session.start_time).total_seconds()
             
-            # Update DB with final metrics
-            update_call_end(
+            # Compute average latencies (in milliseconds)
+            avg_stt = sum(session.stt_latencies) / len(session.stt_latencies) if session.stt_latencies else 0.0
+            avg_llm = sum(session.llm_latencies) / len(session.llm_latencies) if session.llm_latencies else 0.0
+            avg_tts = sum(session.tts_latencies) / len(session.tts_latencies) if session.tts_latencies else 0.0
+            
+            # Update DB with final metrics and latencies asynchronously
+            await aupdate_call_end(
                 call_sid=session.call_sid,
                 end_time=end_time.isoformat(),
                 duration=duration,
                 outcome=outcome,
                 cost_tokens=session.llm_tokens_logged,
                 cost_stt_sec=session.stt_seconds_logged,
-                cost_tts_char=session.tts_characters_logged
+                cost_tts_char=session.tts_characters_logged,
+                stt_latency_ms=avg_stt,
+                llm_latency_ms=avg_llm,
+                tts_latency_ms=avg_tts
             )
             logger.info(
                 f"Session closed: Call {session.call_sid}, Stream {stream_sid}, "
                 f"Duration: {duration:.2f}s, STT Sec: {session.stt_seconds_logged:.2f}, "
-                f"TTS Char: {session.tts_characters_logged}, LLM Tokens: {session.llm_tokens_logged}"
+                f"TTS Char: {session.tts_characters_logged}, LLM Tokens: {session.llm_tokens_logged}, "
+                f"Avg STT Latency: {avg_stt:.1f}ms, Avg LLM Latency: {avg_llm:.1f}ms, Avg TTS Latency: {avg_tts:.1f}ms"
             )
             
 call_manager = CallManager()

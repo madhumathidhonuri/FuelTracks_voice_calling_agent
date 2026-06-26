@@ -1,20 +1,14 @@
 """
-Storage Layer — SQLite
-------------------------
-Provides both synchronous (legacy/test) and async (production) access to the
-SQLite database.
-
-Changes in this version:
-  - Fix 4a: WAL mode + NORMAL synchronous mode enabled in init_db() for safe
-             concurrent access across multiple asyncio tasks on the same call.
-  - Fix 4b: Async versions of all write/read functions added using aiosqlite.
-             Async functions are prefixed with `a` (e.g. acreate_call).
-             Synchronous wrappers are kept for backward compatibility with
-             call_manager.py and existing unit tests.
+Storage Layer — PostgreSQL & SQLite Dual Backend
+------------------------------------------------
+Provides connection pooling for PostgreSQL (using asyncpg) and WAL mode support for SQLite.
+Exposes both async (production) and sync (testing/legacy) interfaces,
+tracking latency metrics alongside call and transcript records.
 """
 import sqlite3
 import logging
 import os
+import asyncio
 from pathlib import Path
 from datetime import datetime
 from config.settings import settings
@@ -25,11 +19,40 @@ try:
 except ImportError:
     _HAS_AIOSQLITE = False
 
+try:
+    import asyncpg
+    _HAS_ASYNCPG = True
+except ImportError:
+    _HAS_ASYNCPG = False
+
 logger = logging.getLogger(__name__)
 
+# PostgreSQL connection pool instance
+_pg_pool = None
+
 # ---------------------------------------------------------------------------
-# Path helpers
+# Backend Selection & Connection Helpers
 # ---------------------------------------------------------------------------
+
+def is_postgres() -> bool:
+    """Check if the configured database URL is a PostgreSQL connection string."""
+    url = settings.DATABASE_URL
+    return url.startswith("postgresql") or url.startswith("postgres")
+
+
+async def get_pg_pool():
+    """Lazily initialize and return the asyncpg PostgreSQL connection pool."""
+    global _pg_pool
+    if not _HAS_ASYNCPG:
+        raise ImportError("asyncpg package is required for PostgreSQL support.")
+    if _pg_pool is None:
+        url = settings.DATABASE_URL
+        # Replace python driver scheme if present
+        pg_url = url.replace("postgresql+asyncpg://", "postgresql://")
+        logger.info("Initializing asyncpg connection pool with PostgreSQL...")
+        _pg_pool = await asyncpg.create_pool(pg_url, min_size=5, max_size=20)
+    return _pg_pool
+
 
 def get_db_path() -> Path:
     """Resolve the SQLite database file path from settings."""
@@ -52,60 +75,124 @@ def get_connection() -> sqlite3.Connection:
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    # WAL mode allows concurrent readers + 1 writer without blocking
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
+def _convert_query(query: str) -> str:
+    """
+    Translate SQLite-style '?' placeholders to PostgreSQL-style '$1, $2, ...' format.
+    No-op if using SQLite.
+    """
+    if not is_postgres():
+        return query
+    parts = query.split('?')
+    res = []
+    for i, part in enumerate(parts[:-1]):
+        res.append(part)
+        res.append(f"${i+1}")
+    res.append(parts[-1])
+    return "".join(res)
+
+
+def _run_sync(coro):
+    """Safely run async coroutines from a synchronous caller context."""
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    if loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(lambda: asyncio.run(coro))
+            return future.result()
+    else:
+        return loop.run_until_complete(coro)
+
+
 # ---------------------------------------------------------------------------
-# Schema init
+# Schema Init
 # ---------------------------------------------------------------------------
+
+async def ainit_db():
+    """Async database schema initialization for PostgreSQL or SQLite."""
+    if is_postgres():
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS calls (
+                call_sid VARCHAR(255) PRIMARY KEY,
+                from_number VARCHAR(100),
+                to_number VARCHAR(100),
+                start_time VARCHAR(100),
+                end_time VARCHAR(100),
+                duration DOUBLE PRECISION DEFAULT 0.0,
+                outcome VARCHAR(100) DEFAULT 'ongoing',
+                call_type VARCHAR(100),
+                cost_tokens INT DEFAULT 0,
+                cost_stt_sec DOUBLE PRECISION DEFAULT 0.0,
+                cost_tts_char INT DEFAULT 0,
+                stt_latency_ms DOUBLE PRECISION DEFAULT 0.0,
+                llm_latency_ms DOUBLE PRECISION DEFAULT 0.0,
+                tts_latency_ms DOUBLE PRECISION DEFAULT 0.0
+            )
+            """)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS transcripts (
+                id SERIAL PRIMARY KEY,
+                call_sid VARCHAR(255),
+                role VARCHAR(100),
+                text TEXT,
+                detected_language VARCHAR(100),
+                language_confidence DOUBLE PRECISION,
+                timestamp VARCHAR(100),
+                FOREIGN KEY (call_sid) REFERENCES calls (call_sid)
+            )
+            """)
+        logger.info("PostgreSQL database schema initialized successfully.")
+    else:
+        async with aiosqlite.connect(get_db_path()) as db:
+            await db.execute("PRAGMA journal_mode=WAL")
+            await db.execute("PRAGMA synchronous=NORMAL")
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS calls (
+                call_sid TEXT PRIMARY KEY,
+                from_number TEXT,
+                to_number TEXT,
+                start_time TEXT,
+                end_time TEXT,
+                duration REAL DEFAULT 0.0,
+                outcome TEXT DEFAULT 'ongoing',
+                call_type TEXT,
+                cost_tokens INTEGER DEFAULT 0,
+                cost_stt_sec REAL DEFAULT 0.0,
+                cost_tts_char INTEGER DEFAULT 0,
+                stt_latency_ms REAL DEFAULT 0.0,
+                llm_latency_ms REAL DEFAULT 0.0,
+                tts_latency_ms REAL DEFAULT 0.0
+            )
+            """)
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS transcripts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call_sid TEXT,
+                role TEXT,
+                text TEXT,
+                detected_language TEXT,
+                language_confidence REAL,
+                timestamp TEXT,
+                FOREIGN KEY (call_sid) REFERENCES calls (call_sid)
+            )
+            """)
+            await db.commit()
+        logger.info("SQLite database schema initialized in WAL mode.")
+
 
 def init_db():
-    """
-    Create tables if they don't exist and configure WAL journal mode.
-    Safe to call multiple times (idempotent).
-    """
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    # Enable WAL mode at schema init too (idempotent)
-    cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA synchronous=NORMAL")
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS calls (
-        call_sid TEXT PRIMARY KEY,
-        from_number TEXT,
-        to_number TEXT,
-        start_time TEXT,
-        end_time TEXT,
-        duration REAL DEFAULT 0.0,
-        outcome TEXT DEFAULT 'ongoing',
-        call_type TEXT,
-        cost_tokens INTEGER DEFAULT 0,
-        cost_stt_sec REAL DEFAULT 0.0,
-        cost_tts_char INTEGER DEFAULT 0
-    )
-    """)
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS transcripts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        call_sid TEXT,
-        role TEXT,
-        text TEXT,
-        detected_language TEXT,
-        language_confidence REAL,
-        timestamp TEXT,
-        FOREIGN KEY (call_sid) REFERENCES calls (call_sid)
-    )
-    """)
-
-    conn.commit()
-    conn.close()
-    logger.info("Database initialized with WAL journal mode.")
+    """Synchronous database schema initialization (backward-compatible)."""
+    _run_sync(ainit_db())
 
 
 # ---------------------------------------------------------------------------
@@ -116,22 +203,7 @@ def create_call(
     call_sid: str, from_number: str, to_number: str,
     call_type: str, start_time: str = None
 ) -> bool:
-    if not start_time:
-        start_time = datetime.now().isoformat()
-
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("""
-        INSERT INTO calls (call_sid, from_number, to_number, start_time, call_type)
-        VALUES (?, ?, ?, ?, ?)
-        """, (call_sid, from_number, to_number, start_time, call_type))
-        conn.commit()
-        return True
-    except sqlite3.IntegrityError:
-        return False
-    finally:
-        conn.close()
+    return _run_sync(acreate_call(call_sid, from_number, to_number, call_type, start_time))
 
 
 def update_call_end(
@@ -142,32 +214,15 @@ def update_call_end(
     cost_tokens: int = 0,
     cost_stt_sec: float = 0.0,
     cost_tts_char: int = 0,
+    stt_latency_ms: float = 0.0,
+    llm_latency_ms: float = 0.0,
+    tts_latency_ms: float = 0.0
 ) -> bool:
-    if not end_time:
-        end_time = datetime.now().isoformat()
-
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            "SELECT cost_tokens, cost_stt_sec, cost_tts_char FROM calls WHERE call_sid = ?",
-            (call_sid,),
-        )
-        row = cursor.fetchone()
-        if row:
-            cost_tokens += row["cost_tokens"] or 0
-            cost_stt_sec += row["cost_stt_sec"] or 0.0
-            cost_tts_char += row["cost_tts_char"] or 0
-
-        cursor.execute("""
-        UPDATE calls
-        SET end_time = ?, duration = ?, outcome = ?, cost_tokens = ?, cost_stt_sec = ?, cost_tts_char = ?
-        WHERE call_sid = ?
-        """, (end_time, duration, outcome, cost_tokens, cost_stt_sec, cost_tts_char, call_sid))
-        conn.commit()
-        return cursor.rowcount > 0
-    finally:
-        conn.close()
+    return _run_sync(aupdate_call_end(
+        call_sid, end_time, duration, outcome,
+        cost_tokens, cost_stt_sec, cost_tts_char,
+        stt_latency_ms, llm_latency_ms, tts_latency_ms
+    ))
 
 
 def add_transcript_turn(
@@ -178,84 +233,50 @@ def add_transcript_turn(
     language_confidence: float = None,
     timestamp: str = None,
 ) -> bool:
-    if not timestamp:
-        timestamp = datetime.now().isoformat()
-
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("""
-        INSERT INTO transcripts (call_sid, role, text, detected_language, language_confidence, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """, (call_sid, role, text, detected_language, language_confidence, timestamp))
-        conn.commit()
-        return True
-    finally:
-        conn.close()
+    return _run_sync(aadd_transcript_turn(
+        call_sid, role, text, detected_language, language_confidence, timestamp
+    ))
 
 
 def get_call_logs(call_sid: str) -> dict:
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT * FROM calls WHERE call_sid = ?", (call_sid,))
-        call_row = cursor.fetchone()
-        if not call_row:
-            return {}
-
-        cursor.execute(
-            "SELECT * FROM transcripts WHERE call_sid = ? ORDER BY id ASC", (call_sid,)
-        )
-        transcript_rows = cursor.fetchall()
-
-        return {
-            "call": dict(call_row),
-            "transcript": [dict(row) for row in transcript_rows],
-        }
-    finally:
-        conn.close()
+    return _run_sync(aget_call_logs(call_sid))
 
 
 def get_recent_calls(limit: int = 50) -> list:
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            "SELECT * FROM calls ORDER BY start_time DESC LIMIT ?", (limit,)
-        )
-        rows = cursor.fetchall()
-        return [dict(row) for row in rows]
-    finally:
-        conn.close()
+    return _run_sync(aget_recent_calls(limit))
 
 
 # ---------------------------------------------------------------------------
-# Async functions (used by pipeline.py and API endpoints for concurrent calls)
+# Async functions (used by pipeline.py and CallManager for concurrency)
 # ---------------------------------------------------------------------------
 
 async def acreate_call(
     call_sid: str, from_number: str, to_number: str,
     call_type: str, start_time: str = None
 ) -> bool:
-    """Async version of create_call using aiosqlite."""
-    if not _HAS_AIOSQLITE:
-        return create_call(call_sid, from_number, to_number, call_type, start_time)
-
+    """Async record call creation in either SQLite or PostgreSQL."""
     if not start_time:
         start_time = datetime.now().isoformat()
 
-    async with aiosqlite.connect(get_db_path()) as db:
-        await db.execute("PRAGMA journal_mode=WAL")
-        await db.execute("PRAGMA synchronous=NORMAL")
-        try:
-            await db.execute("""
-            INSERT INTO calls (call_sid, from_number, to_number, start_time, call_type)
-            VALUES (?, ?, ?, ?, ?)
-            """, (call_sid, from_number, to_number, start_time, call_type))
-            await db.commit()
-            return True
-        except aiosqlite.IntegrityError:
-            return False
+    sql = "INSERT INTO calls (call_sid, from_number, to_number, start_time, call_type) VALUES (?, ?, ?, ?, ?)"
+    params = (call_sid, from_number, to_number, start_time, call_type)
+
+    if is_postgres():
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            try:
+                await conn.execute(_convert_query(sql), *params)
+                return True
+            except asyncpg.UniqueViolationError:
+                return False
+    else:
+        async with aiosqlite.connect(get_db_path()) as db:
+            try:
+                await db.execute(sql, params)
+                await db.commit()
+                return True
+            except aiosqlite.IntegrityError:
+                return False
 
 
 async def aupdate_call_end(
@@ -266,38 +287,62 @@ async def aupdate_call_end(
     cost_tokens: int = 0,
     cost_stt_sec: float = 0.0,
     cost_tts_char: int = 0,
+    stt_latency_ms: float = 0.0,
+    llm_latency_ms: float = 0.0,
+    tts_latency_ms: float = 0.0
 ) -> bool:
-    """Async version of update_call_end using aiosqlite."""
-    if not _HAS_AIOSQLITE:
-        return update_call_end(
-            call_sid, end_time, duration, outcome,
-            cost_tokens, cost_stt_sec, cost_tts_char
-        )
-
+    """Async record final call parameters and turn latencies."""
     if not end_time:
         end_time = datetime.now().isoformat()
 
-    async with aiosqlite.connect(get_db_path()) as db:
-        db.row_factory = aiosqlite.Row
-        await db.execute("PRAGMA journal_mode=WAL")
-        await db.execute("PRAGMA synchronous=NORMAL")
-        cursor = await db.execute(
-            "SELECT cost_tokens, cost_stt_sec, cost_tts_char FROM calls WHERE call_sid = ?",
-            (call_sid,),
-        )
-        row = await cursor.fetchone()
-        if row:
-            cost_tokens += row["cost_tokens"] or 0
-            cost_stt_sec += row["cost_stt_sec"] or 0.0
-            cost_tts_char += row["cost_tts_char"] or 0
+    if is_postgres():
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT cost_tokens, cost_stt_sec, cost_tts_char FROM calls WHERE call_sid = $1",
+                call_sid
+            )
+            if row:
+                cost_tokens += row["cost_tokens"] or 0
+                cost_stt_sec += row["cost_stt_sec"] or 0.0
+                cost_tts_char += row["cost_tts_char"] or 0
 
-        cursor = await db.execute("""
-        UPDATE calls
-        SET end_time = ?, duration = ?, outcome = ?, cost_tokens = ?, cost_stt_sec = ?, cost_tts_char = ?
-        WHERE call_sid = ?
-        """, (end_time, duration, outcome, cost_tokens, cost_stt_sec, cost_tts_char, call_sid))
-        await db.commit()
-        return cursor.rowcount > 0
+            result = await conn.execute(
+                """
+                UPDATE calls
+                SET end_time = $1, duration = $2, outcome = $3, cost_tokens = $4, cost_stt_sec = $5, cost_tts_char = $6,
+                    stt_latency_ms = $7, llm_latency_ms = $8, tts_latency_ms = $9
+                WHERE call_sid = $10
+                """,
+                end_time, duration, outcome, cost_tokens, cost_stt_sec, cost_tts_char,
+                stt_latency_ms, llm_latency_ms, tts_latency_ms, call_sid
+            )
+            return result.startswith("UPDATE") and " 0" not in result
+    else:
+        async with aiosqlite.connect(get_db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT cost_tokens, cost_stt_sec, cost_tts_char FROM calls WHERE call_sid = ?",
+                (call_sid,)
+            )
+            row = await cursor.fetchone()
+            if row:
+                cost_tokens += row["cost_tokens"] or 0
+                cost_stt_sec += row["cost_stt_sec"] or 0.0
+                cost_tts_char += row["cost_tts_char"] or 0
+
+            cursor = await db.execute(
+                """
+                UPDATE calls
+                SET end_time = ?, duration = ?, outcome = ?, cost_tokens = ?, cost_stt_sec = ?, cost_tts_char = ?,
+                    stt_latency_ms = ?, llm_latency_ms = ?, tts_latency_ms = ?
+                WHERE call_sid = ?
+                """,
+                (end_time, duration, outcome, cost_tokens, cost_stt_sec, cost_tts_char,
+                 stt_latency_ms, llm_latency_ms, tts_latency_ms, call_sid)
+            )
+            await db.commit()
+            return cursor.rowcount > 0
 
 
 async def aadd_transcript_turn(
@@ -308,60 +353,66 @@ async def aadd_transcript_turn(
     language_confidence: float = None,
     timestamp: str = None,
 ) -> bool:
-    """Async version of add_transcript_turn using aiosqlite."""
-    if not _HAS_AIOSQLITE:
-        return add_transcript_turn(
-            call_sid, role, text, detected_language, language_confidence, timestamp
-        )
-
+    """Async insert a transcript conversation turn."""
     if not timestamp:
         timestamp = datetime.now().isoformat()
 
-    async with aiosqlite.connect(get_db_path()) as db:
-        await db.execute("PRAGMA journal_mode=WAL")
-        await db.execute("PRAGMA synchronous=NORMAL")
-        await db.execute("""
-        INSERT INTO transcripts (call_sid, role, text, detected_language, language_confidence, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """, (call_sid, role, text, detected_language, language_confidence, timestamp))
-        await db.commit()
-        return True
+    sql = """
+    INSERT INTO transcripts (call_sid, role, text, detected_language, language_confidence, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?)
+    """
+    params = (call_sid, role, text, detected_language, language_confidence, timestamp)
+
+    if is_postgres():
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(_convert_query(sql), *params)
+            return True
+    else:
+        async with aiosqlite.connect(get_db_path()) as db:
+            await db.execute(sql, params)
+            await db.commit()
+            return True
 
 
 async def aget_call_logs(call_sid: str) -> dict:
-    """Async version of get_call_logs using aiosqlite."""
-    if not _HAS_AIOSQLITE:
-        return get_call_logs(call_sid)
-
-    async with aiosqlite.connect(get_db_path()) as db:
-        db.row_factory = aiosqlite.Row
-        await db.execute("PRAGMA journal_mode=WAL")
-        cursor = await db.execute("SELECT * FROM calls WHERE call_sid = ?", (call_sid,))
-        call_row = await cursor.fetchone()
-        if not call_row:
-            return {}
-
-        cursor = await db.execute(
-            "SELECT * FROM transcripts WHERE call_sid = ? ORDER BY id ASC", (call_sid,)
-        )
-        transcript_rows = await cursor.fetchall()
-
-        return {
-            "call": dict(call_row),
-            "transcript": [dict(row) for row in transcript_rows],
-        }
+    """Async retrieve all logs and transcripts associated with a Call SID."""
+    if is_postgres():
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            call_row = await conn.fetchrow("SELECT * FROM calls WHERE call_sid = $1", call_sid)
+            if not call_row:
+                return {}
+            transcript_rows = await conn.fetch("SELECT * FROM transcripts WHERE call_sid = $1 ORDER BY id ASC", call_sid)
+            return {
+                "call": dict(call_row),
+                "transcript": [dict(r) for r in transcript_rows]
+            }
+    else:
+        async with aiosqlite.connect(get_db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM calls WHERE call_sid = ?", (call_sid,))
+            call_row = await cursor.fetchone()
+            if not call_row:
+                return {}
+            cursor = await db.execute("SELECT * FROM transcripts WHERE call_sid = ? ORDER BY id ASC", (call_sid,))
+            transcript_rows = await cursor.fetchall()
+            return {
+                "call": dict(call_row),
+                "transcript": [dict(r) for r in transcript_rows]
+            }
 
 
 async def aget_recent_calls(limit: int = 50) -> list:
-    """Async version of get_recent_calls using aiosqlite."""
-    if not _HAS_AIOSQLITE:
-        return get_recent_calls(limit)
-
-    async with aiosqlite.connect(get_db_path()) as db:
-        db.row_factory = aiosqlite.Row
-        await db.execute("PRAGMA journal_mode=WAL")
-        cursor = await db.execute(
-            "SELECT * FROM calls ORDER BY start_time DESC LIMIT ?", (limit,)
-        )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+    """Async fetch the list of recent call records."""
+    if is_postgres():
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("SELECT * FROM calls ORDER BY start_time DESC LIMIT $1", limit)
+            return [dict(r) for r in rows]
+    else:
+        async with aiosqlite.connect(get_db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM calls ORDER BY start_time DESC LIMIT ?", (limit,))
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]

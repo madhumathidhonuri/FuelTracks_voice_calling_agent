@@ -93,7 +93,7 @@ async def websocket_endpoint(
                     from_number = str(from_number).strip()
                     to_number = str(to_number).strip()
                     
-                    session = call_manager.create_session(
+                    session = await call_manager.create_session(
                         call_sid=resolved_call_sid,
                         from_number=from_number,
                         to_number=to_number,
@@ -152,9 +152,9 @@ async def websocket_endpoint(
             
         # Close the call session and commit metrics to SQLite
         if stream_sid and resolved_call_sid:
-            call_manager.close_session(stream_sid, outcome="completed")
+            await call_manager.close_session(stream_sid, outcome="completed")
         elif resolved_call_sid:
-            call_manager.close_session(f"no_stream_{resolved_call_sid}", outcome="abandoned")
+            await call_manager.close_session(f"no_stream_{resolved_call_sid}", outcome="abandoned")
         
         try:
             await websocket.close()
